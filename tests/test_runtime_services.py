@@ -42,6 +42,35 @@ class RuntimeServicesTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError,"evidence_authorizer"):
                     RuntimeServices(db_path=db,approver_authorizer=lambda actor,r:True)
 
+    def test_blockers_and_evidence_references_are_persisted_and_audited(self):
+        services = RuntimeServices()
+        task = TaskRecord(task_id="mutations", owner="owner", objective="persist task mutations")
+        services.create_task(task)
+        self.assertTrue(services.add_evidence_reference(task, "build-log"))
+        self.assertFalse(services.add_evidence_reference(task, "build-log"))
+        self.assertEqual(services.load_task(task.task_id).evidence, ["build-log"])
+        services.add_blocker(task, "missing fixture")
+        restored = services.load_task(task.task_id)
+        self.assertEqual(restored.status, TaskStatus.BLOCKED)
+        self.assertEqual(restored.blockers, ["missing fixture"])
+        event_types = [event["event_type"] for event in services.store.list_events()]
+        self.assertIn("task.evidence_reference_added", event_types)
+        self.assertIn("task.blocker_added", event_types)
+
+    def test_evidence_reference_cannot_change_after_release_readiness(self):
+        services = RuntimeServices()
+        task = TaskRecord(task_id="sealed-evidence", owner="owner", objective="seal refs")
+        services.create_task(task)
+        for status in (TaskStatus.GROUNDED, TaskStatus.PLANNED, TaskStatus.READY,
+                       TaskStatus.IN_PROGRESS, TaskStatus.VERIFYING):
+            services.transition_task(task, status)
+        services.evidence.add(EvidenceBundle(task_id=task.task_id, title="build-log", content="test evidence"))
+        self.assertTrue(services.evidence.mark_verified(task.task_id))
+        services.add_evidence_reference(task, "build-log")
+        services.transition_task(task, TaskStatus.READY_FOR_RELEASE)
+        with self.assertRaisesRegex(ValueError, "sealed at release readiness"):
+            services.add_evidence_reference(task, "late-evidence")
+
     def test_stale_task_object_is_rejected(self):
         services=RuntimeServices()
         task=TaskRecord(task_id="stale",owner="owner",objective="stale write")

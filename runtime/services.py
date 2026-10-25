@@ -85,6 +85,76 @@ class RuntimeServices:
             t.status,t.updated_at=previous,previous_time
             raise
 
+    def _persist_mutation(self, task: TaskRecord, base_payload: str, previous_status: TaskStatus,
+                          previous_updated_at: str, event_type: str, event_payload: Dict[str, object]) -> None:
+        serialized = json.dumps(self.tasks._entry_payload(self._entry(task)), sort_keys=True,
+                                separators=(",", ":"), allow_nan=False)
+        try:
+            with self.store.transaction() as connection:
+                row = connection.execute("SELECT payload_json FROM tasks WHERE task_id=?", (task.task_id,)).fetchone()
+                if row is None or row["payload_json"] != base_payload:
+                    raise RuntimeError("Concurrent task update detected; reload state before retrying")
+                connection.execute("UPDATE tasks SET payload_json=?,updated_at=? WHERE task_id=?",
+                                   (serialized, task.updated_at, task.task_id))
+                self.store.append_event_in_transaction(
+                    connection, event_type, task_id=task.task_id, actor=task.owner, payload=event_payload
+                )
+        except BaseException:
+            task.status = previous_status
+            task.updated_at = previous_updated_at
+            raise
+
+    def add_blocker(self, task: TaskRecord, blocker: str) -> None:
+        if not isinstance(blocker, str) or not blocker.strip():
+            raise ValueError("A blocker must be a non-empty string")
+        if task.status in {TaskStatus.CLOSED, TaskStatus.CANCELLED}:
+            raise ValueError(f"Cannot block terminal task {task.task_id} in state {task.status.value}")
+        base = self.store.get_task_json(task.task_id)
+        stored = self.load_task(task.task_id)
+        if base is None or stored is None or any(
+            getattr(stored, name) != getattr(task, name)
+            for name in ("status", "owner", "objective", "scope", "blockers", "evidence",
+                         "required_skills", "repo", "branch", "risk_level", "approval_action",
+                         "created_at", "updated_at")
+        ):
+            raise RuntimeError("Stale or mismatched task record; reload state before mutation")
+        previous, previous_time = task.status, task.updated_at
+        TaskStateMachine.add_blocker(task, blocker)
+        self._persist_mutation(
+            task, base, previous, previous_time, "task.blocker_added",
+            {"from": previous.value, "to": task.status.value, "blocker_sha256":
+             __import__("hashlib").sha256(blocker.encode("utf-8")).hexdigest()},
+        )
+
+    def add_evidence_reference(self, task: TaskRecord, reference: str) -> bool:
+        """Attach a reference before release readiness and durably audit the change."""
+        if not isinstance(reference, str) or not reference.strip():
+            raise ValueError("Evidence reference must be a non-empty string")
+        if task.status not in {
+            TaskStatus.INTAKE, TaskStatus.GROUNDED, TaskStatus.PLANNED, TaskStatus.READY,
+            TaskStatus.IN_PROGRESS, TaskStatus.VERIFYING,
+        }:
+            raise ValueError("Evidence references are sealed at release readiness; create a new verification cycle")
+        if reference in task.evidence:
+            return False
+        base = self.store.get_task_json(task.task_id)
+        stored = self.load_task(task.task_id)
+        if base is None or stored is None or any(
+            getattr(stored, name) != getattr(task, name)
+            for name in ("status", "owner", "objective", "scope", "blockers", "evidence",
+                         "required_skills", "repo", "branch", "risk_level", "approval_action",
+                         "created_at", "updated_at")
+        ):
+            raise RuntimeError("Stale or mismatched task record; reload state before mutation")
+        previous, previous_time = task.status, task.updated_at
+        TaskStateMachine.add_evidence(task, reference)
+        self._persist_mutation(
+            task, base, previous, previous_time, "task.evidence_reference_added",
+            {"status": task.status.value, "reference_sha256":
+             __import__("hashlib").sha256(reference.encode("utf-8")).hexdigest()},
+        )
+        return True
+
     def can_perform_action(self,task_id:str,action:str,*,scope:str,evidence:list[str])->bool:
         return self.approvals.can_proceed(task_id,action,evidence=evidence,scope=scope)
 
