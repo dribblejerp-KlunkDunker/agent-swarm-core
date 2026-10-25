@@ -180,6 +180,18 @@ class SQLiteStateStore:
             );
 
             CREATE INDEX IF NOT EXISTS idx_audit_task ON audit_events(task_id, sequence);
+
+            CREATE TRIGGER IF NOT EXISTS audit_events_no_update
+            BEFORE UPDATE ON audit_events
+            BEGIN
+                SELECT RAISE(ABORT, 'audit_events are append-only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS audit_events_no_delete
+            BEFORE DELETE ON audit_events
+            BEGIN
+                SELECT RAISE(ABORT, 'audit_events are append-only');
+            END;
             CREATE INDEX IF NOT EXISTS idx_audit_type ON audit_events(event_type, sequence);
             CREATE INDEX IF NOT EXISTS idx_lock_task ON resource_locks(task_id);
             CREATE INDEX IF NOT EXISTS idx_approval_history_task ON approval_history(task_id, id);
@@ -318,6 +330,117 @@ class SQLiteStateStore:
             if len(page) < 10000:
                 break
         return {"valid": True, "events": verified_count, "error": None}
+
+    def verify_task_status(self, task_id: str, expected_status: str) -> bool:
+        """Reconcile durable task state with its append-only lifecycle history."""
+        if not self.verify_audit_chain()["valid"]:
+            return False
+        serialized = self.get_task_json(task_id)
+        if serialized is None:
+            return False
+        try:
+            payload = json.loads(serialized)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        with self.read_connection() as connection:
+            rows = connection.execute(
+                "SELECT sequence, event_type, payload_json FROM audit_events "
+                "WHERE task_id=? AND event_type IN ('task.created', 'task.state_transition') ORDER BY sequence",
+                (task_id,),
+            ).fetchall()
+        if not rows or rows[0]["event_type"] != "task.created":
+            return False
+        if sum(row["event_type"] == "task.created" for row in rows) != 1:
+            return False
+        try:
+            status = json.loads(rows[0]["payload_json"]).get("status")
+            for row in rows[1:]:
+                event = json.loads(row["payload_json"])
+                if row["event_type"] != "task.state_transition" or event.get("from") != status:
+                    return False
+                target = event.get("to")
+                if not isinstance(target, str):
+                    return False
+                status = target
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return isinstance(status, str) and status == expected_status == payload.get("status")
+
+    def verify_evidence_state(self, task_id: str, references: Optional[List[str]] = None) -> bool:
+        """Verify persisted evidence bytes and status against the audit history."""
+        if not self.verify_audit_chain()["valid"]:
+            return False
+        with self.read_connection() as connection:
+            evidence_rows = connection.execute(
+                "SELECT id, task_id, title, content, source, status, tags_json "
+                "FROM evidence_bundles WHERE task_id=? ORDER BY id",
+                (task_id,),
+            ).fetchall()
+            event_rows = connection.execute(
+                "SELECT sequence, event_type, task_id, payload_json FROM audit_events "
+                "WHERE task_id=? AND event_type IN ('evidence.added','evidence.verified','evidence.rejected') "
+                "ORDER BY sequence",
+                (task_id,),
+            ).fetchall()
+        if not evidence_rows:
+            return False
+        try:
+            events = [{
+                "sequence": row["sequence"],
+                "event_type": row["event_type"],
+                "task_id": row["task_id"],
+                "payload": json.loads(row["payload_json"]),
+            } for row in event_rows]
+        except (TypeError, json.JSONDecodeError):
+            return False
+
+        additions: Dict[int, Dict[str, Any]] = {}
+        for event in events:
+            if event["event_type"] == "evidence.added":
+                record_id = event["payload"].get("record_id")
+                if not isinstance(record_id, int) or record_id in additions:
+                    return False
+                additions[record_id] = event
+
+        verified_titles: set[str] = set()
+        for row in evidence_rows:
+            addition = additions.get(row["id"])
+            if addition is None or addition["task_id"] != task_id:
+                return False
+            try:
+                tags = json.loads(row["tags_json"])
+            except (TypeError, json.JSONDecodeError):
+                return False
+            add_payload = addition["payload"]
+            digest = hashlib.sha256(row["content"].encode("utf-8")).hexdigest()
+            if (
+                add_payload.get("title") != row["title"]
+                or add_payload.get("source") != row["source"]
+                or add_payload.get("content_sha256") != digest
+                or add_payload.get("tags") != tags
+                or add_payload.get("initial_status") != "PENDING"
+            ):
+                return False
+            status = "PENDING"
+            for event in events:
+                if event["sequence"] <= addition["sequence"]:
+                    continue
+                if event["event_type"] not in {"evidence.verified", "evidence.rejected"}:
+                    continue
+                if row["id"] not in event["payload"].get("record_ids", []):
+                    continue
+                target = event["payload"].get("target_status")
+                if target not in {"VERIFIED", "REJECTED"}:
+                    return False
+                status = target
+            if status != row["status"] or status != "VERIFIED":
+                return False
+            verified_titles.add(row["title"])
+        if references is None:
+            return True
+        if not references or any(not isinstance(item, str) or not item.strip() for item in references):
+            return False
+        return set(references).issubset(verified_titles)
 
     def get_approval_json(self, task_id: str) -> Optional[str]:
         with self.read_connection() as connection:

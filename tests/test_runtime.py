@@ -380,6 +380,7 @@ class StorageTests(unittest.TestCase):
             store.append_event("audit.test", payload={"detail": "original"})
             self.assertTrue(store.verify_audit_chain()["valid"])
             with sqlite3.connect(db_path) as connection:
+                connection.execute("DROP TRIGGER IF EXISTS audit_events_no_update")
                 connection.execute("UPDATE audit_events SET payload_json='{}' WHERE sequence=1")
             result = store.verify_audit_chain()
             self.assertFalse(result["valid"])
