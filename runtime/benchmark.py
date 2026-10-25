@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
 from .evidence import EvidenceBundle, EvidenceRegistry, EvidenceStatus
 from .locks import LockRegistry
@@ -57,3 +57,16 @@ class BenchmarkRunner:
 
     def verify(self, task_id: str) -> bool:
         return self.registry.is_verified(task_id)
+
+    def verify_consistency(self, tasks: Sequence[TaskRecord]) -> bool:
+        results = [self.run_core_task(task) for task in tasks]
+        totals = [result.total for result in results]
+        return all(0 <= total <= 100 for total in totals) and len(results) == len(tasks)
+
+    def score_summary(self, tasks: Sequence[TaskRecord]) -> Dict[str, int]:
+        results = [self.run_core_task(task) for task in tasks]
+        return {
+            "average_total": int(sum(item.total for item in results) / max(1, len(results))),
+            "best_total": max(item.total for item in results) if results else 0,
+            "worst_total": min(item.total for item in results) if results else 0,
+        }
