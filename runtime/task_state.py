@@ -54,6 +54,7 @@ class TaskRecord:
     repo: str = ""
     branch: str = ""
     risk_level: str = "LOW"
+    approval_action: str = "release"
     created_at: str = field(default_factory=_utc_now)
     updated_at: str = field(default_factory=_utc_now)
 
@@ -107,7 +108,7 @@ class TaskStateMachine:
                 raise ValueError("A matching pending approval request and target scope are required")
             if not approval_gate.is_pending(
                 task.task_id,
-                "release",
+                task.approval_action or "release",
                 approval_scope,
                 list(task.evidence),
             ):
@@ -118,7 +119,7 @@ class TaskStateMachine:
                 raise ValueError("An explicit approval gate and target scope are required for release")
             if not approval_gate.can_proceed(
                 task.task_id,
-                "release",
+                task.approval_action or "release",
                 evidence=list(task.evidence),
                 scope=approval_scope,
             ):

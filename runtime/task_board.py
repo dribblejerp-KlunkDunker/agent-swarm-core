@@ -23,6 +23,11 @@ class TaskBoardEntry:
     objective: str
     status: str
     scope: List[str] = field(default_factory=list)
+    required_skills: List[str] = field(default_factory=list)
+    branch: str = ""
+    risk_level: str = "LOW"
+    approval_action: str = "release"
+    created_at: str = ""
     blockers: List[str] = field(default_factory=list)
     evidence: List[str] = field(default_factory=list)
     repo: str = ""

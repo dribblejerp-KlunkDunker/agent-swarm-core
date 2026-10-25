@@ -438,6 +438,11 @@ class ApprovalGate:
                 connection.execute("UPDATE approvals SET record_json=? WHERE task_id=?", (_serialize_record(record), task_id))
                 reason = "evidence_mismatch"
 
+            if reason is None and _is_production() and not self.store.verify_task_status(task_id, "AWAITING_APPROVAL"):
+                reason = "task_state_not_audited_awaiting_approval"
+            if reason is None and _is_production() and not self.store.verify_evidence_state(task_id, list(evidence or [])):
+                reason = "evidence_state_or_audit_mismatch"
+
             if reason:
                 self.store.append_event_in_transaction(
                     connection, "action.denied", task_id=task_id,

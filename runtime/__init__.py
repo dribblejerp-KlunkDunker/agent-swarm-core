@@ -2,13 +2,14 @@
 
 from .task_state import TaskRecord, TaskStateMachine, TaskStatus
 from .locks import LockRegistry, Lock
-from .evidence import EvidenceBundle, EvidenceRegistry, EvidenceStatus
+from .evidence import EvidenceBundle, EvidenceRegistry, EvidenceStatus, EvidenceAuthorizer
 from .orchestrator import Orchestrator, SkillRoute
 from .task_board import TaskBoard, TaskBoardEntry
 from .approval import ApprovalGate, ApprovalRecord, ApprovalStatus, ReleaseGate
 from .repo_grounding import RepoFact, RepoGroundingEngine
 from .benchmark import BenchmarkResult, BenchmarkRunner
 from .storage import SQLiteStateStore
+from .services import RuntimeHealth, RuntimeServices
 from .validation import (
     ValidationResult,
     finalize_release_gate,
@@ -30,6 +31,7 @@ __all__ = [
     "EvidenceBundle",
     "EvidenceRegistry",
     "EvidenceStatus",
+    "EvidenceAuthorizer",
     "Orchestrator",
     "SkillRoute",
     "TaskBoard",
@@ -43,6 +45,8 @@ __all__ = [
     "BenchmarkResult",
     "BenchmarkRunner",
     "SQLiteStateStore",
+    "RuntimeHealth",
+    "RuntimeServices",
     "ValidationResult",
     "finalize_release_gate",
     "run_full_validation",
