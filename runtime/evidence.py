@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional
@@ -22,16 +23,20 @@ class EvidenceBundle:
 
 
 class EvidenceRegistry:
-    """Tracks evidence associated with a task and its verification status."""
+    """Tracks evidence without allowing callers to mutate stored verification state."""
 
     def __init__(self) -> None:
         self._evidence: Dict[str, List[EvidenceBundle]] = {}
 
     def add(self, bundle: EvidenceBundle) -> None:
-        self._evidence.setdefault(bundle.task_id, []).append(bundle)
+        if not bundle.task_id.strip() or not bundle.title.strip() or not bundle.content.strip():
+            raise ValueError("Evidence requires a task_id, title, and non-empty content")
+        if bundle.status != EvidenceStatus.PENDING:
+            raise ValueError("New evidence must start as PENDING and be verified by the registry")
+        self._evidence.setdefault(bundle.task_id, []).append(copy.deepcopy(bundle))
 
     def get(self, task_id: str) -> List[EvidenceBundle]:
-        return list(self._evidence.get(task_id, []))
+        return copy.deepcopy(self._evidence.get(task_id, []))
 
     def mark_verified(self, task_id: str, title: Optional[str] = None) -> None:
         for item in self._evidence.get(task_id, []):

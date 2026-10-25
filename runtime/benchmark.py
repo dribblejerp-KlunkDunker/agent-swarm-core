@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Sequence
+from typing import Dict, Sequence
 
-from .evidence import EvidenceBundle, EvidenceRegistry, EvidenceStatus
-from .locks import LockRegistry
-from .task_state import TaskRecord, TaskStateMachine, TaskStatus
+from .evidence import EvidenceBundle, EvidenceRegistry
+from .task_state import TaskRecord, TaskStatus
 
 
 @dataclass
@@ -19,7 +18,7 @@ class BenchmarkResult:
 
 
 class BenchmarkRunner:
-    """Simple benchmark harness for core runtime checks."""
+    """Scores runtime checks and gives evidence credit only for verified task evidence."""
 
     def __init__(self) -> None:
         self.registry = EvidenceRegistry()
@@ -27,20 +26,29 @@ class BenchmarkRunner:
     def run_core_task(self, task: TaskRecord) -> BenchmarkResult:
         architecture = 100
         safety = 100
-        evidence = 100
         benchmark = 100
+        evidence_verified = bool(task.evidence) and self.registry.is_verified(task.task_id)
+        evidence = 100 if evidence_verified else 0
 
         if task.status == TaskStatus.BLOCKED:
             architecture = 80
             safety = 85
-            evidence = 90
             benchmark = 75
 
         if task.status == TaskStatus.CANCELLED:
             architecture = 75
             safety = 80
-            evidence = 85
             benchmark = 70
+
+        if task.status in {
+            TaskStatus.READY_FOR_RELEASE,
+            TaskStatus.AWAITING_APPROVAL,
+            TaskStatus.RELEASED,
+            TaskStatus.CLOSED,
+        } and not evidence_verified:
+            # A task cannot score as safely release-ready without verified evidence.
+            safety = 0
+            benchmark = 0
 
         total = int((architecture + safety + evidence + benchmark) / 4)
         return BenchmarkResult(
@@ -53,6 +61,8 @@ class BenchmarkRunner:
         )
 
     def add_evidence(self, task_id: str, evidence_item: EvidenceBundle) -> None:
+        if task_id != evidence_item.task_id:
+            raise ValueError("Evidence task_id must match the task_id passed to add_evidence")
         self.registry.add(evidence_item)
 
     def verify(self, task_id: str) -> bool:
@@ -60,8 +70,19 @@ class BenchmarkRunner:
 
     def verify_consistency(self, tasks: Sequence[TaskRecord]) -> bool:
         results = [self.run_core_task(task) for task in tasks]
-        totals = [result.total for result in results]
-        return all(0 <= total <= 100 for total in totals) and len(results) == len(tasks)
+        for result in results:
+            component_scores = (
+                result.architecture_score,
+                result.safety_score,
+                result.evidence_score,
+                result.benchmark_score,
+            )
+            if not all(0 <= score <= 100 for score in component_scores):
+                return False
+            expected_total = int(sum(component_scores) / 4)
+            if result.total != expected_total:
+                return False
+        return len(results) == len(tasks)
 
     def score_summary(self, tasks: Sequence[TaskRecord]) -> Dict[str, int]:
         results = [self.run_core_task(task) for task in tasks]

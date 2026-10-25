@@ -7,10 +7,11 @@ from pathlib import Path
 
 from runtime import finalize_release_gate
 from runtime.approval import ApprovalGate, ApprovalStatus, ReleaseGate
+from runtime.benchmark import BenchmarkRunner
 from runtime.evidence import EvidenceBundle, EvidenceRegistry, EvidenceStatus
 from runtime.locks import LockRegistry
 from runtime.repo_grounding import RepoGroundingEngine
-from runtime.task_board import TaskBoard, TaskBoardEntry
+from runtime.task_board import TaskBoard
 from runtime.task_state import TaskRecord, TaskStateMachine, TaskStatus
 from runtime.validation import run_full_validation
 
@@ -31,7 +32,7 @@ class ApprovalGateTests(unittest.TestCase):
         gate = ApprovalGate()
         evidence = ["test log", "diff"]
         gate.request("task-2", "deploy", "production", "reviewer", evidence=evidence)
-        self.assertTrue(gate.approve("task-2"))
+        self.assertTrue(gate.approve("task-2", approver="reviewer", evidence=evidence))
 
         self.assertFalse(gate.can_proceed("task-2", "publish", evidence=evidence, scope="production"))
         self.assertFalse(gate.can_proceed("task-2", "deploy", evidence=evidence, scope="staging"))
@@ -41,13 +42,20 @@ class ApprovalGateTests(unittest.TestCase):
     def test_empty_evidence_and_rejected_approval_are_blocked(self) -> None:
         gate = ApprovalGate()
         gate.request("task-3", "release", "production", "reviewer", evidence=[])
-        self.assertFalse(gate.approve("task-3"))
+        self.assertFalse(gate.approve("task-3", approver="reviewer", evidence=[]))
         self.assertEqual(gate.get("task-3").status, ApprovalStatus.BLOCKED)
 
         gate.request("task-4", "publish", "public", "reviewer", evidence=["review"])
         self.assertTrue(gate.reject("task-4", "review declined"))
-        self.assertFalse(gate.approve("task-4"))
+        self.assertFalse(gate.approve("task-4", approver="reviewer", evidence=["review"]))
         self.assertFalse(gate.can_proceed("task-4", "publish", evidence=["review"], scope="public"))
+
+    def test_wrong_approver_cannot_approve(self) -> None:
+        gate = ApprovalGate()
+        gate.request("task-5", "deploy", "production", "release-manager", evidence=["review"])
+        self.assertFalse(gate.approve("task-5", approver="requester", evidence=["review"]))
+        self.assertEqual(gate.get("task-5").status, ApprovalStatus.PENDING)
+        self.assertTrue(gate.approve("task-5", approver="release-manager", evidence=["review"]))
 
     def test_action_aliases_cannot_bypass_approval(self) -> None:
         for action in (
@@ -65,7 +73,7 @@ class ApprovalGateTests(unittest.TestCase):
     def test_new_request_preserves_previous_approval_record(self) -> None:
         gate = ApprovalGate()
         gate.request("task-history", "release", "production", "reviewer", evidence=["v1"])
-        self.assertTrue(gate.approve("task-history"))
+        self.assertTrue(gate.approve("task-history", approver="reviewer", evidence=["v1"]))
         gate.request("task-history", "release", "production", "reviewer", evidence=["v2"])
         self.assertEqual(len(gate.history("task-history")), 2)
         self.assertEqual(gate.history("task-history")[0].status, ApprovalStatus.APPROVED)
@@ -78,6 +86,13 @@ class LockRegistryTests(unittest.TestCase):
         self.assertTrue(registry.reserve("src/", "task-a", "owner-a", "directory edit"))
         self.assertFalse(registry.reserve("src/module.py", "task-b", "owner-b", "file edit"))
         self.assertEqual(registry.check("src/module.py").task_id, "task-a")
+
+    def test_lock_objects_are_immutable(self) -> None:
+        registry = LockRegistry()
+        registry.reserve("src/module.py", "task-a", "owner-a", "file edit")
+        lock = registry.check("src/module.py")
+        with self.assertRaises(AttributeError):
+            lock.owner = "attacker"
 
     def test_same_owner_can_reserve_nested_paths(self) -> None:
         registry = LockRegistry()
@@ -98,6 +113,20 @@ class LockRegistryTests(unittest.TestCase):
 
 
 class EvidenceAndStateTests(unittest.TestCase):
+    def test_registry_defensively_copies_evidence_objects(self) -> None:
+        registry = EvidenceRegistry()
+        bundle = EvidenceBundle(task_id="task-copy", title="source", content="verified fact")
+        registry.add(bundle)
+        bundle.status = EvidenceStatus.VERIFIED
+        self.assertFalse(registry.is_verified("task-copy"))
+
+        returned = registry.get("task-copy")
+        returned[0].status = EvidenceStatus.VERIFIED
+        self.assertFalse(registry.is_verified("task-copy"))
+
+        registry.mark_verified("task-copy")
+        self.assertTrue(registry.is_verified("task-copy"))
+
     def test_rejected_evidence_cannot_be_reverified_by_mark_verified(self) -> None:
         registry = EvidenceRegistry()
         registry.add(EvidenceBundle(task_id="task-e", title="claim", content="disputed"))
@@ -129,6 +158,11 @@ class EvidenceAndStateTests(unittest.TestCase):
             TaskStateMachine.transition(task, TaskStatus.READY_FOR_RELEASE, evidence_registry=registry)
 
         registry.mark_verified(task.task_id)
+        task.evidence = ["unrelated-reference"]
+        with self.assertRaisesRegex(ValueError, "match verified evidence records"):
+            TaskStateMachine.transition(task, TaskStatus.READY_FOR_RELEASE, evidence_registry=registry)
+
+        task.evidence = ["build-log"]
         TaskStateMachine.transition(task, TaskStatus.READY_FOR_RELEASE, evidence_registry=registry)
         TaskStateMachine.transition(task, TaskStatus.AWAITING_APPROVAL)
 
@@ -141,7 +175,7 @@ class EvidenceAndStateTests(unittest.TestCase):
                 approval_gate=gate,
                 approval_scope="production",
             )
-        self.assertTrue(gate.approve(task.task_id))
+        self.assertTrue(gate.approve(task.task_id, approver="reviewer", evidence=task.evidence))
         TaskStateMachine.transition(
             task,
             TaskStatus.RELEASED,
@@ -161,6 +195,46 @@ class EvidenceAndStateTests(unittest.TestCase):
         task = TaskRecord(task_id="closed", owner="owner", objective="closed", status=TaskStatus.CLOSED)
         with self.assertRaisesRegex(ValueError, "terminal task"):
             TaskStateMachine.add_blocker(task, "late blocker")
+
+
+class BenchmarkTests(unittest.TestCase):
+    def test_evidence_score_requires_verified_evidence(self) -> None:
+        runner = BenchmarkRunner()
+        task = TaskRecord(
+            task_id="bench-evidence",
+            owner="owner",
+            objective="measure evidence",
+            status=TaskStatus.READY,
+            evidence=["build-log"],
+        )
+        runner.add_evidence(
+            task.task_id,
+            EvidenceBundle(task_id=task.task_id, title="build-log", content="test output"),
+        )
+        self.assertEqual(runner.run_core_task(task).evidence_score, 0)
+        runner.registry.mark_verified(task.task_id)
+        result = runner.run_core_task(task)
+        self.assertEqual(result.evidence_score, 100)
+        self.assertEqual(result.total, 100)
+
+    def test_benchmark_rejects_mismatched_evidence_task_id(self) -> None:
+        runner = BenchmarkRunner()
+        with self.assertRaisesRegex(ValueError, "must match"):
+            runner.add_evidence("task-a", EvidenceBundle(task_id="task-b", title="log", content="output"))
+
+    def test_release_ready_task_without_verified_evidence_is_penalized(self) -> None:
+        runner = BenchmarkRunner()
+        task = TaskRecord(
+            task_id="bench-release",
+            owner="owner",
+            objective="release score",
+            status=TaskStatus.READY_FOR_RELEASE,
+            evidence=["build-log"],
+        )
+        result = runner.run_core_task(task)
+        self.assertEqual(result.evidence_score, 0)
+        self.assertEqual(result.safety_score, 0)
+        self.assertEqual(result.benchmark_score, 0)
 
 
 class TaskBoardTests(unittest.TestCase):
@@ -204,8 +278,7 @@ class RepoGroundingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "package.json").write_text(json.dumps({"name": "demo"}), encoding="utf-8")
-            engine = RepoGroundingEngine(directory)
-            commands = engine._discover_commands(["package.json"])
+            commands = RepoGroundingEngine(directory)._discover_commands(["package.json"])
             self.assertIn("npm install", commands)
             self.assertNotIn("npm test", commands)
             self.assertNotIn("npm run build", commands)

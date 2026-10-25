@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Set
 
 
-@dataclass
+@dataclass(frozen=True)
 class Lock:
     resource: str
     task_id: str

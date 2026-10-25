@@ -95,6 +95,12 @@ class TaskStateMachine:
                 raise ValueError("Evidence references are required before release readiness")
             if evidence_registry is None or not evidence_registry.is_verified(task.task_id):
                 raise ValueError("Verified evidence is required before release readiness")
+            verified_titles = {
+                item.title for item in evidence_registry.get(task.task_id)
+                if getattr(item.status, "value", item.status) == "VERIFIED"
+            }
+            if not set(task.evidence).issubset(verified_titles):
+                raise ValueError("Task evidence references must match verified evidence records")
 
         if new_state == TaskStatus.RELEASED:
             if approval_gate is None or not approval_scope:
