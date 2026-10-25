@@ -47,11 +47,35 @@ The `security-reviewer` checks for risk if the task touches auth, secrets, depen
 ### 6. Release
 The `release-manager` performs final readiness checks before any push or deployment.
 
+## State model and enforcement
+
+The swarm must operate on a canonical task state model defined in `.agent/STATE_MODEL.md`.
+
+This is the minimum required contract:
+
+- every task must have a task record
+- every task must have a status
+- every task must have one owner
+- every task must have explicit evidence at verification time
+- every irreversible action requires approval
+- every handoff must use the handoff schema
+- every file or resource used by a task must be reserved by a lock when conflict is possible
+
+## State machine
+
+```text
+INTAKE -> GROUNDED -> PLANNED -> READY -> IN_PROGRESS -> VERIFYING -> READY_FOR_RELEASE -> AWAITING_APPROVAL -> RELEASED -> CLOSED
+                               \                          \                         \
+                                \-> BLOCKED -------------------> READY
+```
+
+The state machine is authoritative. Invalid transitions are rejected.
+
 ## Task ownership
 
 Use this format:
 
-```
+```text
 Task: <short name>
 Owner: <agent or person>
 Status: <planned / in-progress / blocked / done>
@@ -63,7 +87,7 @@ Next: <exact next action>
 
 Every handoff must include:
 
-```
+```text
 Task: <task name>
 From: <agent>
 To: <next agent>
@@ -73,6 +97,17 @@ Blockers: <none or exact blocker>
 Next Action: <exact next step>
 ```
 
+## Shared state files
+
+Create and maintain:
+
+- `.agent/PROJECT_CONTEXT.md` — repo facts, commands, architecture, and constraints
+- `.agent/TASK_BOARD.md` — active tasks and ownership
+- `.agent/HANDOFFS/*.md` — explicit transitions between agents
+- `.agent/CHECKPOINTS.md` — state and progress markers
+- `.agent/DECISIONS.md` — non-obvious decisions and rationale
+- `.agent/STATE_MODEL.md` — authoritative task and evidence state model
+
 ## Safety rules
 
 - No direct edits across unrelated subsystems.
@@ -80,3 +115,5 @@ Next Action: <exact next step>
 - No “done” without verification.
 - No deployment without approval.
 - No secret storage in repo or chat logs.
+- No task may advance to a later state without a documented state transition and supporting evidence.
+- No conflicting file locks may be active for the same resource.
