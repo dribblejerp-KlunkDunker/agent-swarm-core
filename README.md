@@ -4,15 +4,30 @@ This repository contains a practical architecture for a swarm-based runtime that
 
 ## What this repo contains
 
-This repo captures the architecture for:
+This repo captures the architecture and working runtime checks for:
 
 - swarm state machine
 - orchestration engine
 - lock and coordination model
-- repo adapter model
-- approval model
+- repo grounding and evidence model
+- approval gate for irreversible action
 - evaluation framework
-- field hardening and operations
+- field hardening and operational safety
+- final validation and release gate checks
+
+## Runtime implementation
+
+The runtime package is implemented in `runtime/` and includes:
+
+- `task_state.py` — explicit task lifecycle and valid transitions
+- `locks.py` — lock registry for resource coordination
+- `evidence.py` — evidence tracking and verification state
+- `approval.py` — approval and release gate enforcement
+- `orchestrator.py` — skill-route selection
+- `repo_grounding.py` — grounded repo inspection and unknown handling
+- `task_board.py` — durable task board records
+- `benchmark.py` — benchmark scoring and consistency checks
+- `validation.py` — final validation suite for safety and release gates
 
 ## Core architecture documents
 
@@ -35,6 +50,7 @@ The swarm is not just a set of specialist agents or prompts. It is a system that
 - approval for irreversible action
 - repository-grounded planning
 - measurable quality and benchmark validation
+- release-gate control before production actions
 
 ## Operating principles
 
@@ -44,6 +60,7 @@ The swarm is not just a set of specialist agents or prompts. It is a system that
 - no overlapping edits without coordination
 - no unsupported repo claim without fact evidence
 - no state jump without review
+- no release without evidence-backed gate approval
 
 ## Quick start
 
@@ -58,10 +75,33 @@ Read these in order:
 7. `.agent/FIELD_HARDENING.md`
 8. `.agent/OPERATIONS_RUNBOOK.md`
 
+## Runtime validation
+
+The runtime includes a built-in validation module to check the final safety profile:
+
+```bash
+python - <<'PY'
+from runtime.validation import run_full_validation
+results = run_full_validation()
+for result in results:
+    print(result.name, result.passed, result.details)
+PY
+```
+
+This exercises:
+
+- invalid transition rejection
+- lock conflict handling
+- evidence-required completion gating
+- approval-required irreversible-action blocking
+- resume/recovery continuity
+- benchmark consistency and scoring stability
+- release gate finalization
+
 ## Recommended usage
 
-Use the repo as a reference implementation for the control plane and runtime rules behind an agent swarm. It is designed to be practical, audit-friendly, and suitable for real-world use with tight operational boundaries.
+Use the repo as a reference implementation for the control plane and runtime rules behind an agent swarm. It is designed to be practical, audit-friendly, and suitable for real-world use with tight coordination, evidence standards, and operational enforceability.
 
 ## Current status
 
-This repo is the architecture and governance foundation for an operational swarm system intended to be used in real engineering environments.
+This repo provides the architecture, runtime governance, and validation foundation for an operational swarm system intended for real engineering environments.
