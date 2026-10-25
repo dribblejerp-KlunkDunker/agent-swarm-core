@@ -2,7 +2,7 @@
 
 from .task_state import TaskRecord, TaskStateMachine, TaskStatus
 from .locks import LockRegistry, Lock
-from .evidence import EvidenceBundle, EvidenceRegistry
+from .evidence import EvidenceBundle, EvidenceRegistry, EvidenceStatus
 from .orchestrator import Orchestrator, SkillRoute
 from .task_board import TaskBoard, TaskBoardEntry
 from .approval import ApprovalGate, ApprovalRecord, ApprovalStatus, ReleaseGate
@@ -10,7 +10,7 @@ from .repo_grounding import RepoFact, RepoGroundingEngine
 from .benchmark import BenchmarkResult, BenchmarkRunner
 from .validation import (
     ValidationResult,
-    finalise_release_gate,
+    finalize_release_gate,
     run_full_validation,
     validate_approval_required_irreversible_actions,
     validate_evidence_required_completion,
@@ -28,6 +28,7 @@ __all__ = [
     "LockRegistry",
     "EvidenceBundle",
     "EvidenceRegistry",
+    "EvidenceStatus",
     "Orchestrator",
     "SkillRoute",
     "TaskBoard",
@@ -41,7 +42,7 @@ __all__ = [
     "BenchmarkResult",
     "BenchmarkRunner",
     "ValidationResult",
-    "finalise_release_gate",
+    "finalize_release_gate",
     "run_full_validation",
     "validate_invalid_transitions",
     "validate_lock_conflicts",

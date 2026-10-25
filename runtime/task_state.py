@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class TaskStatus(str, Enum):
@@ -49,12 +54,12 @@ class TaskRecord:
     repo: str = ""
     branch: str = ""
     risk_level: str = "LOW"
-    created_at: str = ""
-    updated_at: str = ""
+    created_at: str = field(default_factory=_utc_now)
+    updated_at: str = field(default_factory=_utc_now)
 
 
 class TaskStateMachine:
-    """Small explicit state machine for swarm task progression."""
+    """State machine with evidence and approval gates on release transitions."""
 
     @staticmethod
     def can_transition(current: TaskStatus, new_state: TaskStatus) -> bool:
@@ -63,21 +68,59 @@ class TaskStateMachine:
         return new_state in VALID_TRANSITIONS.get(current, [])
 
     @staticmethod
-    def transition(task: TaskRecord, new_state: TaskStatus) -> None:
+    def transition(
+        task: TaskRecord,
+        new_state: TaskStatus,
+        *,
+        evidence_registry: Optional[Any] = None,
+        approval_gate: Optional[Any] = None,
+        approval_scope: Optional[str] = None,
+        justification: Optional[str] = None,
+    ) -> None:
+        if not isinstance(new_state, TaskStatus):
+            raise ValueError(f"Unknown task state: {new_state!r}")
+        if task.status == new_state:
+            return
         if not TaskStateMachine.can_transition(task.status, new_state):
             raise ValueError(
                 f"Invalid transition from {task.status.value} to {new_state.value} for task {task.task_id}"
             )
+
+        if task.status == TaskStatus.BLOCKED and new_state != TaskStatus.CANCELLED:
+            if not justification or not justification.strip():
+                raise ValueError("A blocked task requires an explicit unblock justification")
+
+        if new_state == TaskStatus.READY_FOR_RELEASE:
+            if not task.evidence:
+                raise ValueError("Evidence references are required before release readiness")
+            if evidence_registry is None or not evidence_registry.is_verified(task.task_id):
+                raise ValueError("Verified evidence is required before release readiness")
+
+        if new_state == TaskStatus.RELEASED:
+            if approval_gate is None or not approval_scope:
+                raise ValueError("An explicit approval gate and target scope are required for release")
+            if not approval_gate.can_proceed(
+                task.task_id,
+                "release",
+                evidence=list(task.evidence),
+                scope=approval_scope,
+            ):
+                raise ValueError("Release is blocked: matching, current approval and evidence are required")
+
         task.status = new_state
-        task.updated_at = "runtime"
+        task.updated_at = _utc_now()
 
     @staticmethod
     def add_blocker(task: TaskRecord, blocker: str) -> None:
+        if task.status in {TaskStatus.CLOSED, TaskStatus.CANCELLED}:
+            raise ValueError(f"Cannot block terminal task {task.task_id} in state {task.status.value}")
         if blocker not in task.blockers:
             task.blockers.append(blocker)
         task.status = TaskStatus.BLOCKED
+        task.updated_at = _utc_now()
 
     @staticmethod
     def add_evidence(task: TaskRecord, evidence_item: str) -> None:
         if evidence_item not in task.evidence:
             task.evidence.append(evidence_item)
+            task.updated_at = _utc_now()

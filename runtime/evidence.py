@@ -22,7 +22,7 @@ class EvidenceBundle:
 
 
 class EvidenceRegistry:
-    """Tracks evidence associated with a task and whether it is sufficient."""
+    """Tracks evidence associated with a task and its verification status."""
 
     def __init__(self) -> None:
         self._evidence: Dict[str, List[EvidenceBundle]] = {}
@@ -35,8 +35,13 @@ class EvidenceRegistry:
 
     def mark_verified(self, task_id: str, title: Optional[str] = None) -> None:
         for item in self._evidence.get(task_id, []):
-            if title is None or item.title == title:
+            if (title is None or item.title == title) and item.status == EvidenceStatus.PENDING:
                 item.status = EvidenceStatus.VERIFIED
+
+    def mark_rejected(self, task_id: str, title: Optional[str] = None) -> None:
+        for item in self._evidence.get(task_id, []):
+            if title is None or item.title == title:
+                item.status = EvidenceStatus.REJECTED
 
     def is_verified(self, task_id: str) -> bool:
         items = self._evidence.get(task_id, [])

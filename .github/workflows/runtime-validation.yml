@@ -1,0 +1,45 @@
+name: Runtime Validation
+
+on:
+  push:
+    paths:
+      - "runtime/**"
+      - "tests/**"
+      - ".github/workflows/runtime-validation.yml"
+  pull_request:
+    paths:
+      - "runtime/**"
+      - "tests/**"
+      - ".github/workflows/runtime-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -v
+      - name: Run runtime audit
+        run: |
+          python - <<'PY'
+          from runtime.validation import run_full_validation
+
+          results = run_full_validation()
+          for result in results:
+              status = "PASS" if result.passed else "FAIL"
+              print(f"{status}: {result.name}")
+              for detail in result.details:
+                  print(f"  - {detail}")
+          failures = [result.name for result in results if not result.passed]
+          if failures:
+              raise SystemExit(f"Runtime audit failed: {', '.join(failures)}")
+          PY
