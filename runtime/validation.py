@@ -157,7 +157,7 @@ def validate_resume_recovery() -> ValidationResult:
             and recovered.blockers == ["missing dependency"]
             and recovered.evidence == ["partial evidence"]
         )
-        path_removed = not board_path.exists()
+    path_removed = not board_path.exists()
     return ValidationResult(
         name="resume_recovery",
         passed=passed and path_removed,
