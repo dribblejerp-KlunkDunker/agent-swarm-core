@@ -59,7 +59,7 @@ class TaskRecord:
 
 
 class TaskStateMachine:
-    """State machine with evidence and approval gates on release transitions."""
+    """State machine with verification and approval gates on release transitions."""
 
     @staticmethod
     def can_transition(current: TaskStatus, new_state: TaskStatus) -> bool:
@@ -101,6 +101,17 @@ class TaskStateMachine:
             }
             if not set(task.evidence).issubset(verified_titles):
                 raise ValueError("Task evidence references must match verified evidence records")
+
+        if new_state == TaskStatus.AWAITING_APPROVAL:
+            if approval_gate is None or not approval_scope:
+                raise ValueError("A matching pending approval request and target scope are required")
+            if not approval_gate.is_pending(
+                task.task_id,
+                "release",
+                approval_scope,
+                list(task.evidence),
+            ):
+                raise ValueError("Awaiting approval requires a pending release request matching scope and evidence")
 
         if new_state == TaskStatus.RELEASED:
             if approval_gate is None or not approval_scope:

@@ -5,27 +5,58 @@ on:
     paths:
       - "runtime/**"
       - "tests/**"
+      - "skills/**"
+      - ".agent/**"
+      - "README.md"
+      - "SWARM_*.md"
+      - "PRODUCTION_HARDENING.md"
+      - ".gitignore"
       - ".github/workflows/runtime-validation.yml"
   pull_request:
     paths:
       - "runtime/**"
       - "tests/**"
+      - "skills/**"
+      - ".agent/**"
+      - "README.md"
+      - "SWARM_*.md"
+      - "PRODUCTION_HARDENING.md"
+      - ".gitignore"
       - ".github/workflows/runtime-validation.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: runtime-validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   runtime-audit:
+    name: runtime-audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONHASHSEED: "0"
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Check out repository (pinned action)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # checkout v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python (pinned action)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # setup-python v5
         with:
           python-version: "3.12"
+          cache: false
+      - name: Check patch whitespace
+        run: git diff --check HEAD^ HEAD
+      - name: Compile runtime and tests
+        run: python -m compileall -q runtime tests
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
       - name: Run runtime audit
@@ -42,4 +73,15 @@ jobs:
           failures = [result.name for result in results if not result.passed]
           if failures:
               raise SystemExit(f"Runtime audit failed: {', '.join(failures)}")
+          PY
+      - name: Verify audit chain integrity
+        run: |
+          python - <<'PY'
+          from runtime.storage import SQLiteStateStore
+
+          store = SQLiteStateStore()
+          result = store.verify_audit_chain()
+          print(result)
+          if not result["valid"]:
+              raise SystemExit("Audit-chain validation failed")
           PY

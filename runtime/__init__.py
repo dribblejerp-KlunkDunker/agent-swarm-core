@@ -1,4 +1,4 @@
-"""Runtime package for swarm task state, locks, evidence, orchestration, and approval."""
+"""Runtime package for swarm task state, locks, evidence, orchestration, persistence, and approval."""
 
 from .task_state import TaskRecord, TaskStateMachine, TaskStatus
 from .locks import LockRegistry, Lock
@@ -8,6 +8,7 @@ from .task_board import TaskBoard, TaskBoardEntry
 from .approval import ApprovalGate, ApprovalRecord, ApprovalStatus, ReleaseGate
 from .repo_grounding import RepoFact, RepoGroundingEngine
 from .benchmark import BenchmarkResult, BenchmarkRunner
+from .storage import SQLiteStateStore
 from .validation import (
     ValidationResult,
     finalize_release_gate,
@@ -41,6 +42,7 @@ __all__ = [
     "RepoGroundingEngine",
     "BenchmarkResult",
     "BenchmarkRunner",
+    "SQLiteStateStore",
     "ValidationResult",
     "finalize_release_gate",
     "run_full_validation",

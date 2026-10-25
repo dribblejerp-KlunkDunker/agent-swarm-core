@@ -11,6 +11,7 @@ from .evidence import EvidenceBundle, EvidenceRegistry, EvidenceStatus
 from .locks import LockRegistry
 from .task_board import TaskBoard
 from .task_state import TaskRecord, TaskStateMachine, TaskStatus
+from .storage import SQLiteStateStore
 
 
 @dataclass
@@ -43,8 +44,8 @@ def validate_lock_conflicts() -> ValidationResult:
     same_owner_child = registry.reserve("src/module.py", "task-a", "owner-a", "specific file edit")
     conflicting_task = registry.reserve("src/module.py", "task-b", "owner-b", "overlapping edit")
     sibling_prefix = registry.reserve("src-old/file.py", "task-c", "owner-c", "independent path")
-    wrong_owner_release = registry.release("src", "task-b")
-    correct_release = registry.release("src", "task-a")
+    wrong_owner_release = registry.release("src", "task-b", "owner-b")
+    correct_release = registry.release("src", "task-a", "owner-a")
     passed = first and same_owner_child and not conflicting_task and sibling_prefix and not wrong_owner_release and correct_release
     return ValidationResult(
         name="lock_conflicts",
@@ -105,7 +106,9 @@ def validate_approval_required_irreversible_actions() -> ValidationResult:
 
     no_evidence_gate = ApprovalGate()
     no_evidence_gate.request("task-no-evidence", "release", "production", "approver-b", evidence=[])
-    empty_evidence_approved = no_evidence_gate.approve("task-no-evidence")
+    empty_evidence_approved = no_evidence_gate.approve(
+        "task-no-evidence", approver="approver-b", evidence=[]
+    )
 
     history_preserved = len(gate.history("task-approve")) == 1
     passed = (
@@ -135,7 +138,6 @@ def validate_approval_required_irreversible_actions() -> ValidationResult:
 
 
 def validate_resume_recovery() -> ValidationResult:
-    board_path: Path
     with TemporaryDirectory(prefix="swarm-board-validation-") as temporary_dir:
         board_path = Path(temporary_dir) / "TASK_BOARD_VALIDATE.json"
         board = TaskBoard(board_path=str(board_path))
@@ -155,13 +157,16 @@ def validate_resume_recovery() -> ValidationResult:
             and recovered.blockers == ["missing dependency"]
             and recovered.evidence == ["partial evidence"]
         )
-    path_removed_after_validation = not board_path.exists()
-    details = [
-        f"recovered={recovered is not None}",
-        f"status={recovered.status if recovered else None}",
-        f"temporary_board_removed={path_removed_after_validation}",
-    ]
-    return ValidationResult(name="resume_recovery", passed=passed and path_removed_after_validation, details=details)
+        path_removed = not board_path.exists()
+    return ValidationResult(
+        name="resume_recovery",
+        passed=passed and path_removed,
+        details=[
+            f"recovered={recovered is not None}",
+            f"status={recovered.status if recovered else None}",
+            f"temporary_board_removed={path_removed}",
+        ],
+    )
 
 
 def verify_benchmark_consistency() -> ValidationResult:
@@ -176,11 +181,12 @@ def verify_benchmark_consistency() -> ValidationResult:
     passed = (
         all(0 <= total <= 100 for total in totals)
         and results["bench-ok"].total >= results["bench-blocked"].total >= results["bench-cancelled"].total
+        and runner.verify_consistency(tasks)
     )
     return ValidationResult(
         name="benchmark_consistency",
         passed=passed,
-        details=[f"totals={totals}"],
+        details=[f"totals={totals}", f"component_scores_consistent={runner.verify_consistency(tasks)}"],
     )
 
 
@@ -194,7 +200,9 @@ def finalize_release_gate() -> ValidationResult:
 
     no_evidence_gate = ReleaseGate()
     no_evidence_gate.request("release-2", "release", "production", "approver-b", evidence=[])
-    empty_evidence_blocked = not no_evidence_gate.approve("release-2")
+    empty_evidence_blocked = not no_evidence_gate.approve(
+        "release-2", approver="approver-b", evidence=[]
+    )
     passed = blocked_while_pending and explicit_approval and allowed_after_approval and empty_evidence_blocked
     return ValidationResult(
         name="release_gate",
@@ -208,6 +216,32 @@ def finalize_release_gate() -> ValidationResult:
     )
 
 
+def validate_durable_state() -> ValidationResult:
+    with TemporaryDirectory(prefix="swarm-state-validation-") as temporary_dir:
+        db_path = str(Path(temporary_dir) / "state.sqlite3")
+        store = SQLiteStateStore(db_path)
+        store.append_event("audit.validation", task_id="storage-validation", payload={"check": "chain"})
+        chain = store.verify_audit_chain()
+        store.put_task_json(
+            "persisted",
+            '{"task_id":"persisted","owner":"owner","objective":"persist","status":"BLOCKED","scope":[],"blockers":["dependency"],"evidence":[],"repo":"","updated_at":"now"}',
+            "now",
+            actor="owner",
+        )
+        store2 = SQLiteStateStore(db_path)
+        restored = store2.get_task_json("persisted")
+        passed = chain["valid"] and chain["events"] == 1 and restored is not None
+    return ValidationResult(
+        name="durable_state_and_audit",
+        passed=passed,
+        details=[
+            f"audit_chain_valid={chain['valid']}",
+            f"audit_events={chain['events']}",
+            f"task_survived_reopen={restored is not None}",
+        ],
+    )
+
+
 def run_full_validation() -> List[ValidationResult]:
     return [
         validate_invalid_transitions(),
@@ -217,4 +251,5 @@ def run_full_validation() -> List[ValidationResult]:
         validate_resume_recovery(),
         verify_benchmark_consistency(),
         finalize_release_gate(),
+        validate_durable_state(),
     ]

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Sequence
+from typing import Dict, Sequence, Optional
 
 from .evidence import EvidenceBundle, EvidenceRegistry
+from .storage import SQLiteStateStore
 from .task_state import TaskRecord, TaskStatus
 
 
@@ -20,8 +21,13 @@ class BenchmarkResult:
 class BenchmarkRunner:
     """Scores runtime checks and gives evidence credit only for verified task evidence."""
 
-    def __init__(self) -> None:
-        self.registry = EvidenceRegistry()
+    def __init__(
+        self,
+        state_store: Optional[SQLiteStateStore] = None,
+        *,
+        db_path: Optional[str] = None,
+    ) -> None:
+        self.registry = EvidenceRegistry(state_store=state_store, db_path=db_path)
 
     def run_core_task(self, task: TaskRecord) -> BenchmarkResult:
         architecture = 100
@@ -34,19 +40,16 @@ class BenchmarkRunner:
             architecture = 80
             safety = 85
             benchmark = 75
-
         if task.status == TaskStatus.CANCELLED:
             architecture = 75
             safety = 80
             benchmark = 70
-
         if task.status in {
             TaskStatus.READY_FOR_RELEASE,
             TaskStatus.AWAITING_APPROVAL,
             TaskStatus.RELEASED,
             TaskStatus.CLOSED,
         } and not evidence_verified:
-            # A task cannot score as safely release-ready without verified evidence.
             safety = 0
             benchmark = 0
 
@@ -79,8 +82,7 @@ class BenchmarkRunner:
             )
             if not all(0 <= score <= 100 for score in component_scores):
                 return False
-            expected_total = int(sum(component_scores) / 4)
-            if result.total != expected_total:
+            if result.total != int(sum(component_scores) / 4):
                 return False
         return len(results) == len(tasks)
 
