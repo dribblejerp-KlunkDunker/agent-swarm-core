@@ -73,3 +73,21 @@ class ApprovalGate:
             "destructive-action",
         }
         return action.lower() in irreversible
+
+    def can_proceed(self, task_id: str, action: str, evidence: Optional[List[str]] = None) -> bool:
+        if not self.requires_approval(action):
+            return True
+        record = self._records.get(task_id)
+        if record is None:
+            self.request(task_id, action, "runtime", "system", evidence or [])
+            record = self._records[task_id]
+        if evidence is not None:
+            record.evidence = evidence
+        return self.approve(task_id)
+
+
+class ReleaseGate(ApprovalGate):
+    """Final gate used before a release action is considered safe to proceed."""
+
+    def can_release(self, task_id: str, evidence: Optional[List[str]] = None) -> bool:
+        return self.can_proceed(task_id, "release", evidence=evidence)
