@@ -1,40 +1,33 @@
 # Task Board
 
-This file is the live task registry for the swarm.
-
-Use one block per task.
+## Pilot task
 
 ```text
-Task ID: <task-id>
-Title: <short task name>
-Status: INTAKE | GROUNDED | PLANNED | READY | IN_PROGRESS | VERIFYING | READY_FOR_RELEASE | AWAITING_APPROVAL | RELEASED | BLOCKED | CANCELLED | CLOSED
-Owner: <agent or human>
-Primary Skill: <skill name>
-Complementary Skills: <skill names>
-Repository: <repo name>
-Branch: <branch>
-Base Revision: <commit or branch>
-Task Request: <one-line request>
-Objective: <what success looks like>
-In Scope:
-- <item>
-Out of Scope:
-- <item>
-Acceptance Criteria:
-- [ ] <criterion>
-Evidence Required:
-- <artifact or command>
-Reserved Files / Resources:
-- <resource>
-Blockers:
-- <none or blocker>
-Risk Level: LOW | MEDIUM | HIGH | CRITICAL
-Approval Required: YES | NO
-Approved By: <person or team>
-Last Handoff: <agent -> agent or none>
-Updated At: <timestamp>
+task_id: pilot-2026-10-25-001
+title: Add swarm runtime model to the repository
+owner: dribblejerp-KlunkDunker
+status: COMPLETE
+primary_skill: swarm-orchestrator
+complementary_skills: [project-grounding, task-planner, evidence-auditor]
+repo: dribblejerp-KlunkDunker/agent-swarm-core
+objective: create the missing runtime document that matches the repo architecture and governance model
+scope:
+  - add a runtime file to the repo root
+  - align the runtime definition with the existing architecture docs
+  - provide a concrete runtime lifecycle and safety model
+out_of_scope:
+  - broad refactor of repo docs
+  - production deployment changes
+acceptance_criteria:
+  - SWARM_RUNTIME.md exists in the repo root
+  - the document defines runtime state flow, task controls, evidence, locks, and approvals
+  - the content aligns with the repo architecture and governance materials
+  - no unresolved blocker remains
+blockers: none
+evidence:
+  - repository content review
+  - README references the missing runtime document
+  - file created successfully in repo root
+created_at: 2026-10-25T03:57:00Z
+updated_at: 2026-10-25T03:57:00Z
 ```
-
-## Current board state
-
-No tasks are active by default. Add tasks here as they are created.
