@@ -69,7 +69,7 @@ class ApprovalRecord:
 
 
 class ApprovalGate:
-    """Require an explicit approval for risky actions and bind it to exact evidence and scope."""
+    """Require explicit approval for risky actions and bind it to evidence and scope."""
 
     IRREVERSIBLE_ACTIONS = {
         "merge",
@@ -128,13 +128,16 @@ class ApprovalGate:
         record = self._records.get(task_id)
         if record is None or record.status != ApprovalStatus.PENDING:
             return False
-        if approver is not None and approver.strip() != record.approver:
+        # Missing actor/evidence must never be interpreted as approval by the requested reviewer.
+        if approver is None or not approver.strip() or evidence is None:
             return False
-        if not record.evidence:
+        if approver.strip() != record.approver:
+            return False
+        if not record.evidence or not evidence:
             record.status = ApprovalStatus.BLOCKED
             record.notes = (record.notes + " Evidence is required before approval.").strip()
             return False
-        if evidence is not None and not _same_evidence(list(evidence), record.evidence):
+        if not _same_evidence(list(evidence), record.evidence):
             record.status = ApprovalStatus.BLOCKED
             record.notes = (record.notes + " Evidence changed; submit a fresh approval request.").strip()
             return False
