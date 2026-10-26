@@ -89,7 +89,12 @@ class TaskBoard:
         objective = payload.get("objective", "")
         repo = payload.get("repo", "")
         updated_at = payload.get("updated_at", "")
-        if not all(isinstance(value, str) for value in (owner, objective, repo, updated_at)):
+        branch = payload.get("branch", "")
+        risk_level = payload.get("risk_level", "LOW")
+        approval_action = payload.get("approval_action", "release")
+        created_at = payload.get("created_at", "")
+        string_fields = (owner, objective, repo, updated_at, branch, risk_level, approval_action, created_at)
+        if not all(isinstance(value, str) for value in string_fields):
             raise ValueError(f"Invalid string field in task board record {task_id!r}")
         return TaskBoardEntry(
             task_id=stored_task_id,
@@ -97,6 +102,11 @@ class TaskBoard:
             objective=objective,
             status=status,
             scope=TaskBoard._string_list(payload.get("scope", []), "scope", task_id),
+            required_skills=TaskBoard._string_list(payload.get("required_skills", []), "required_skills", task_id),
+            branch=branch,
+            risk_level=risk_level,
+            approval_action=approval_action,
+            created_at=created_at,
             blockers=TaskBoard._string_list(payload.get("blockers", []), "blockers", task_id),
             evidence=TaskBoard._string_list(payload.get("evidence", []), "evidence", task_id),
             repo=repo,
@@ -107,6 +117,11 @@ class TaskBoard:
     def _entry_payload(entry: TaskBoardEntry) -> Dict[str, object]:
         if not entry.task_id or not entry.owner:
             raise ValueError("Task board entries require task_id and owner")
+        if not all(isinstance(value, str) for value in (
+            entry.task_id, entry.owner, entry.objective, entry.branch, entry.risk_level,
+            entry.approval_action, entry.created_at, entry.repo, entry.updated_at,
+        )):
+            raise ValueError(f"Task board string fields are invalid for task {entry.task_id!r}")
         TaskStatus(entry.status)
         return {
             "task_id": entry.task_id,
@@ -114,6 +129,11 @@ class TaskBoard:
             "objective": entry.objective,
             "status": entry.status,
             "scope": TaskBoard._string_list(entry.scope, "scope", entry.task_id),
+            "required_skills": TaskBoard._string_list(entry.required_skills, "required_skills", entry.task_id),
+            "branch": entry.branch,
+            "risk_level": entry.risk_level,
+            "approval_action": entry.approval_action,
+            "created_at": entry.created_at,
             "blockers": TaskBoard._string_list(entry.blockers, "blockers", entry.task_id),
             "evidence": TaskBoard._string_list(entry.evidence, "evidence", entry.task_id),
             "repo": entry.repo,
@@ -194,8 +214,10 @@ class TaskBoard:
     def add_or_update(self, task: TaskRecord) -> TaskBoardEntry:
         entry = TaskBoardEntry(
             task_id=task.task_id, owner=task.owner, objective=task.objective, status=task.status.value,
-            scope=list(task.scope), blockers=list(task.blockers), evidence=list(task.evidence),
-            repo=task.repo, updated_at=task.updated_at or _utc_now(),
+            scope=list(task.scope), required_skills=list(task.required_skills), branch=task.branch,
+            risk_level=task.risk_level, approval_action=task.approval_action, created_at=task.created_at,
+            blockers=list(task.blockers), evidence=list(task.evidence), repo=task.repo,
+            updated_at=task.updated_at or _utc_now(),
         )
         payload = self._entry_payload(entry)
         if self._store is not None:
