@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Set
+from typing import List, Optional, Set
 
 from .storage import SQLiteStateStore, utc_now
 
@@ -246,6 +246,12 @@ class LockRegistry:
                 if self._overlaps(normalized, row["resource"])
             ]
             return max(matches, key=lambda lock: len(lock.resource), default=None)
+
+    def list_lock_records(self) -> List[Lock]:
+        with self.store.transaction() as connection:
+            self._expire_in_transaction(connection, utc_now())
+            rows = connection.execute("SELECT * FROM resource_locks ORDER BY resource").fetchall()
+            return [self._row_to_lock(row) for row in rows]
 
     def list_locks(self) -> Set[str]:
         with self.store.transaction() as connection:

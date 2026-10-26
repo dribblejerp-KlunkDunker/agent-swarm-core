@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from .task_state import TaskStatus, TaskStateMachine, unblock_targets
+
 
 AUDIT_MODE_SHA256 = "sha256"
 AUDIT_MODE_HMAC = "hmac-sha256"
@@ -471,19 +473,34 @@ class SQLiteStateStore:
             return False
         if sum(row["event_type"] == "task.created" for row in rows) != 1:
             return False
+        # Replay the history under the state machine's rules, so a rewritten task row cannot
+        # smuggle in a transition (or a blocked_from) that the runtime would have refused.
         try:
-            status = json.loads(rows[0]["payload_json"]).get("status")
+            status = TaskStatus(json.loads(rows[0]["payload_json"]).get("status"))
+            blocked_from = ""
             for row in rows[1:]:
                 event = json.loads(row["payload_json"])
-                if row["event_type"] == "task.created" or event.get("from") != status:
+                if row["event_type"] == "task.created" or event.get("from") != status.value:
                     return False
-                target = event.get("to")
-                if not isinstance(target, str):
+                target = TaskStatus(event.get("to"))
+                if row["event_type"] == "task.blocker_added":
+                    if target != TaskStatus.BLOCKED:
+                        return False
+                elif not TaskStateMachine.can_transition(status, target):
                     return False
+                elif status == TaskStatus.BLOCKED and target not in {TaskStatus.BLOCKED, TaskStatus.CANCELLED}:
+                    if target not in unblock_targets(blocked_from):
+                        return False
+                    blocked_from = ""
+                if target == TaskStatus.BLOCKED and status != TaskStatus.BLOCKED:
+                    blocked_from = status.value
                 status = target
-        except (TypeError, json.JSONDecodeError):
+        except (TypeError, ValueError, json.JSONDecodeError):
             return False
-        return isinstance(status, str) and status == expected_status == payload.get("status")
+        return (
+            status.value == expected_status == payload.get("status")
+            and blocked_from == payload.get("blocked_from", "")
+        )
 
     def verify_evidence_state(
         self, task_id: str, references: Optional[List[str]] = None, *, chain_verified: bool = False
@@ -586,6 +603,8 @@ class SQLiteStateStore:
         actor: Optional[str] = None,
     ) -> None:
         """Low-level upsert with no lifecycle checks; RuntimeServices is the checked path."""
+        if os.environ.get("SWARM_ENV", "").strip().lower() in {"prod", "production"}:
+            raise RuntimeError("Raw task writes bypass lifecycle checks; use RuntimeServices in production")
         with self.transaction() as connection:
             connection.execute(
                 """

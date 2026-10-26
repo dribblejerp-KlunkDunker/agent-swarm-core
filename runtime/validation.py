@@ -392,7 +392,19 @@ def validate_audit_tamper_detection() -> ValidationResult:
     )
 
 
+# Configuration that would point the checks at a real deployment's database or identity layer.
+_RUNTIME_ENV_KEYS = ("SWARM_ENV", "SWARM_STATE_DB", "SWARM_AUDIT_KEY", "SWARM_AUTHORIZER_MODULE")
+
+
 def run_full_validation() -> List[ValidationResult]:
+    """Run every check in isolation: never against SWARM_STATE_DB or under the caller's SWARM_ENV."""
+    with patch.dict(os.environ):
+        for key in _RUNTIME_ENV_KEYS:
+            os.environ.pop(key, None)
+        return _run_checks()
+
+
+def _run_checks() -> List[ValidationResult]:
     return [
         validate_invalid_transitions(),
         validate_lock_conflicts(),

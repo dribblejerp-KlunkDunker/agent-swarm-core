@@ -16,6 +16,8 @@ Set all three variables before constructing runtime components:
 
 The audit key turns the audit log into an HMAC chain. Inject it at process start from a secrets manager; never store it next to the database or in the repository. Losing the key means the existing chain can no longer be verified, so back it up with the same care as the database. A database written without a key cannot later be opened with one (and vice versa): the runtime refuses rather than mixing chain modes, so archive an unkeyed development database and start a new one for production.
 
+**Upgrading an existing production database:** a database created before the keyed chain existed, with audit events in it, will not open once SWARM_AUDIT_KEY is set. Verify its chain one last time, archive it read-only with its final checkpoint, and start a new database. Open tasks must be re-created in the new database and taken through their stages again.
+
 The database path must be on a durable local filesystem. The runtime rejects missing paths and in-memory storage when production mode is enabled. SQLite database files are restricted to owner read/write on POSIX systems; store the file in a directory owned by the runtime service account with directory permissions 0700. Back up the database consistently and test restores.
 
 Use a dedicated low-privilege OS identity for the runtime. Do not place the database in the source checkout, a shared downloads directory, or a temporary directory. Keep database backups and any exported audit data under the same confidentiality controls.
@@ -39,7 +41,7 @@ Example contract (illustrative; connect it to the application's real identity la
 
 The application must call ApprovalGate.approve(task_id, approver=authenticated_subject, evidence=current_evidence) only after interactive or service-to-service authentication. A valid approval is bound to the requested action, exact scope, evidence digest, expiry, approver, requester, and an audit event hash. Replacing the approval row without the corresponding audit proof is rejected.
 
-Request approvals through RuntimeServices.request_approval(task, scope=..., approver=...). It records the task owner as the requester, and the requester can never approve. In production, can_proceed denies any approval without a recorded requester (reason separation_of_duties_unverified), so an approval requested directly on the gate cannot be used to act.
+Request approvals through RuntimeServices.request_approval(task, scope=..., approver=...). It records the task owner as the requester, and the requester can never approve. In production, can_proceed reads the task's durable owner and denies the action unless the requester is that owner and the approver is someone else (identities compare case-insensitively), so an approval requested directly on the gate with an invented requester cannot be used to act.
 
 Actions are matched by category. An action string that names more than one irreversible category, such as "merge and deploy", becomes a compound action that only an approval for that same compound action can satisfy.
 
@@ -59,7 +61,7 @@ The audit log is append-only through the runtime API and HMAC-chained in product
 
 Deleting the newest events is still invisible to the chain alone. Export checkpoints regularly with SQLiteStateStore.audit_checkpoint() (or `swarm audit checkpoint --out <file>`) to storage the database host cannot rewrite, and verify against the latest one with verify_audit_chain(anchor=checkpoint) or `swarm audit verify --anchor <file>`. RuntimeServices.health_check(audit_anchor=...) includes the anchor in its readiness verdict. This is **tamper-evident, not tamper-proof**: someone holding the key and write access to both the database and every checkpoint store can still rewrite history.
 
-Task records must change only through RuntimeServices in production. TaskBoard.add_or_update() and TaskBoard.save() write without lifecycle checks and raise in production; in development they are allowed and logged with lifecycle_checked=false.
+Task records must change only through RuntimeServices in production. TaskBoard.add_or_update(), TaskBoard.save() and SQLiteStateStore.put_task_json() write without lifecycle checks and raise in production; in development they are allowed and logged with lifecycle_checked=false. Independently of that, the production release check replays each task's audit history under the state machine's rules, so a task row rewritten outside the runtime (for example to fake where a task was blocked from) fails the check.
 
 Never place passwords, access tokens, API keys, private keys, credential values, or raw secrets in approval notes, lock reasons, evidence titles, task objectives, logs, or audit payloads. Keep evidence references concise and content out of ordinary audit events.
 

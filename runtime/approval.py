@@ -12,13 +12,34 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from .storage import SQLiteStateStore, utc_now
 
 
-_MUTATION_WORDS = {"rotation", "rotate", "change", "update", "modify", "mutation", "write"}
+_MUTATION_WORDS = {"rotation", "rotate", "change", "update", "modify", "mutation", "mutate", "write"}
 _DESTRUCTIVE_WORDS = {
     "destructive", "destroy", "delete", "drop", "truncate", "wipe", "purge", "erase", "rm", "force",
 }
 
 
-def _action_categories(tokens: Set[str]) -> List[str]:
+def _word_forms(token: str) -> Set[str]:
+    """The token plus likely base forms, so "migrations", "deploying" and "dropped" match."""
+    forms = {token}
+    if token.endswith("ies") and len(token) > 4:
+        forms.add(token[:-3] + "y")
+    if token.endswith("es") and len(token) > 3:
+        forms.add(token[:-2])
+    if token.endswith("s") and len(token) > 3:
+        forms.add(token[:-1])
+    for suffix in ("ing", "ed"):
+        if token.endswith(suffix) and len(token) > len(suffix) + 2:
+            stem = token[: -len(suffix)]
+            forms.update({stem, stem + "e"})
+            if len(stem) > 2 and stem[-1] == stem[-2]:
+                forms.add(stem[:-1])  # dropped -> drop
+    return forms
+
+
+def _action_categories(raw_tokens: Set[str]) -> List[str]:
+    tokens: Set[str] = set()
+    for token in raw_tokens:
+        tokens |= _word_forms(token)
     categories: List[str] = []
     if "merge" in tokens:
         categories.append("merge")
@@ -74,6 +95,10 @@ def _evidence_digest(evidence: List[str]) -> str:
 
 def _parse_time(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _same_identity(left: str, right: str) -> bool:
+    return bool(left) and bool(right) and left.strip().casefold() == right.strip().casefold()
 
 
 def _is_production() -> bool:
@@ -183,7 +208,7 @@ class ApprovalGate:
         evidence_copy = list(evidence or [])
         if not all((task_id, action, scope, approver)):
             raise ValueError("task_id, action, scope, and approver must be non-empty")
-        if requester and requester == approver:
+        if _same_identity(requester, approver):
             raise ValueError("Separation of duties: the requester cannot be the approver")
         if any(not isinstance(item, str) or not item.strip() for item in evidence_copy):
             raise ValueError("evidence references must be non-empty strings")
@@ -270,7 +295,7 @@ class ApprovalGate:
                     payload={"reason": "actor_mismatch"},
                 )
                 return False
-            if record.requester and attempted_actor == record.requester:
+            if _same_identity(attempted_actor, record.requester):
                 self.store.append_event_in_transaction(
                     connection, "approval.denied", task_id=task_id, actor=attempted_actor,
                     payload={"reason": "separation_of_duties"},
@@ -298,6 +323,13 @@ class ApprovalGate:
                 self.store.append_event_in_transaction(
                     connection, "approval.denied", task_id=task_id, actor=attempted_actor,
                     payload={"reason": "production_identity_authorizer_not_configured"},
+                )
+                return False
+            duty_problem = self._separation_of_duties_problem(connection, task_id, record) if _is_production() else None
+            if duty_problem:
+                self.store.append_event_in_transaction(
+                    connection, "approval.denied", task_id=task_id, actor=attempted_actor,
+                    payload={"reason": duty_problem},
                 )
                 return False
             if self.approver_authorizer is not None:
@@ -404,6 +436,22 @@ class ApprovalGate:
             and bool(record.evidence)
         )
 
+    @staticmethod
+    def _separation_of_duties_problem(connection: Any, task_id: str, record: ApprovalRecord) -> Optional[str]:
+        """Production rule: the request came from the task owner and someone else approved it."""
+        row = connection.execute("SELECT payload_json FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+        try:
+            owner = json.loads(row["payload_json"]).get("owner", "") if row else ""
+        except (TypeError, json.JSONDecodeError):
+            owner = ""
+        if not owner or not isinstance(owner, str):
+            return "task_owner_unknown"
+        if not _same_identity(record.requester, owner):
+            return "separation_of_duties_unverified"
+        if _same_identity(record.approver, owner) or _same_identity(record.approver, record.requester):
+            return "separation_of_duties_violated"
+        return None
+
     @classmethod
     def requires_approval(cls, action: str) -> bool:
         normalized = _canonical_action(action)
@@ -481,10 +529,8 @@ class ApprovalGate:
                 connection.execute("UPDATE approvals SET record_json=? WHERE task_id=?", (_serialize_record(record), task_id))
                 reason = "evidence_mismatch"
 
-            if reason is None and _is_production() and (
-                not record.requester or record.requester == record.approver
-            ):
-                reason = "separation_of_duties_unverified"
+            if reason is None and _is_production():
+                reason = self._separation_of_duties_problem(connection, task_id, record)
             if reason is None and _is_production() and not self.store.verify_task_status(
                 task_id, "AWAITING_APPROVAL", chain_verified=True
             ):

@@ -69,9 +69,10 @@ class RuntimeServicesTests(unittest.TestCase):
                 self._advance_to_awaiting_approval(services, task)
                 # Re-request directly on the gate, without a requester, so separation of duties is unknown.
                 services.approvals.request(task.task_id, "deploy", "production", "idp:approver", evidence=task.evidence)
-                self.assertTrue(services.approvals.approve(task.task_id, approver="idp:approver", evidence=task.evidence))
+                self.assertFalse(services.approvals.approve(task.task_id, approver="idp:approver", evidence=task.evidence))
                 self.assertFalse(services.can_perform_action(task.task_id, "deploy", scope="production", evidence=task.evidence))
-                reasons = [e["payload"].get("reason") for e in services.store.list_events() if e["event_type"] == "action.denied"]
+                reasons = [e["payload"].get("reason") for e in services.store.list_events()
+                           if e["event_type"] in {"approval.denied", "action.denied"}]
                 self.assertIn("separation_of_duties_unverified", reasons)
 
     def test_task_blocked_during_lifecycle_can_still_release_in_production(self):

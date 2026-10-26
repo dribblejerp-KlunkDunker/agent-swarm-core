@@ -174,7 +174,7 @@ def cmd_lock_release(args: argparse.Namespace) -> Any:
 
 def cmd_lock_list(args: argparse.Namespace) -> Any:
     services = _services(args)
-    return [asdict(services.locks.check(resource)) for resource in sorted(services.locks.list_locks())]
+    return [asdict(lock) for lock in services.locks.list_lock_records()]
 
 
 # ---- approvals --------------------------------------------------------------------------
@@ -227,17 +227,37 @@ def cmd_approval_check(args: argparse.Namespace) -> Any:
     allowed = services.can_perform_action(task.task_id, action, scope=args.scope, evidence=list(task.evidence))
     denial = None
     if not allowed:
-        denials = [e for e in services.store.list_events(limit=10000)
-                   if e["event_type"] == "action.denied" and e["task_id"] == task.task_id]
-        denial = denials[-1]["payload"].get("reason") if denials else None
+        with services.store.read_connection() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM audit_events WHERE task_id=? AND event_type='action.denied' "
+                "ORDER BY sequence DESC LIMIT 1",
+                (task.task_id,),
+            ).fetchone()
+        denial = json.loads(row["payload_json"]).get("reason") if row else None
     return {"allowed": allowed, "action": action, "scope": args.scope, "denial_reason": denial}
 
 
 # ---- audit, health, grounding -----------------------------------------------------------
 
+def _latest_checkpoint(path: str) -> Dict[str, Any]:
+    """Read a checkpoint file: one JSON object, or the JSONL that `audit checkpoint --out` appends."""
+    text = Path(path).read_text(encoding="utf-8")
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        raise CommandError(f"Checkpoint file {path} is empty")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return json.loads(lines[-1])
+    except json.JSONDecodeError as exc:
+        raise CommandError(f"Checkpoint file {path} is not valid JSON or JSONL") from exc
+
+
 def cmd_audit_verify(args: argparse.Namespace) -> Any:
     services = _services(args)
-    anchor = json.loads(Path(args.anchor).read_text(encoding="utf-8")) if args.anchor else None
+    anchor = _latest_checkpoint(args.anchor) if args.anchor else None
     return services.store.verify_audit_chain(anchor=anchor)
 
 

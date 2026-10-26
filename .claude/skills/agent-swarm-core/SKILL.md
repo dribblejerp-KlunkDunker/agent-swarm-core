@@ -91,7 +91,8 @@ Every command prints JSON. A non-zero exit code means it refused or failed.
   - `action_mismatch` or `scope_mismatch`: you asked for something other than what was approved.
   - `evidence_mismatch`: the evidence changed, so request approval again.
   - `approval_expired`: approvals last 15 minutes; request a new one.
-  - `separation_of_duties_unverified`: the approval was not requested through the task.
+  - `separation_of_duties_unverified` or `separation_of_duties_violated`: request it again with
+    `swarm approval request`, naming an approver who is not the task owner.
 - **Abandoning work:** run `swarm task move <id> CANCELLED` and release the locks.
 
 ## Inspecting state

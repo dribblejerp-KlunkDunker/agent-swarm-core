@@ -20,18 +20,23 @@ class RepoFact:
     evidence: List[str] = field(default_factory=list)
 
 
-# Whole-word patterns, so ordinary words such as "author" or "tokenize" are not reported.
+def _words(alternation: str) -> "re.Pattern[str]":
+    # Letters and digits bound a word but "_" does not, so snake_case names such as
+    # db_password still match while ordinary words such as "author" or "tokenize" do not.
+    return re.compile(rf"(?<![a-z0-9])(?:{alternation})(?![a-z0-9])")
+
+
 RISK_PATTERNS = [
-    ("auth", re.compile(r"\b(auth|authn|authz|oauth2?|authentication|authori[sz]ation|login)\b")),
-    ("security", re.compile(r"\b(security|vulnerabilit(y|ies)|cve-\d{4}-\d+)\b")),
-    ("secret", re.compile(r"\b(secrets?|private[_ -]?key|api[_ -]?key|passwords?)\b")),
-    ("token", re.compile(r"\b(access[_ -]?tokens?|bearer|refresh[_ -]?tokens?|jwt)\b")),
-    ("deploy", re.compile(r"\b(deploy|deploys|deployment|deployments)\b")),
-    ("publish", re.compile(r"\b(publish|npm publish|twine upload)\b")),
-    ("network", re.compile(r"\b(requests\.(get|post)|urllib|fetch\(|http\.client|socket\.)")),
-    ("database", re.compile(r"\b(database|sqlite3?|postgres(ql)?|mysql|migrations?)\b")),
-    ("shell", re.compile(r"\b(subprocess|os\.system|shell=true|exec\(|eval\()")),
-    ("permission", re.compile(r"\b(chmod|chown|sudo|setuid|permissions?)\b")),
+    ("auth", _words(r"auth|authn|authz|oauth2?|authenticat[a-z]*|authori[sz][a-z]*|login")),
+    ("security", _words(r"security|vulnerabilit(?:y|ies)|cve-\d{4}-\d+")),
+    ("secret", _words(r"secrets?|private[_ -]?keys?|api[_ -]?keys?|passwords?|passwd")),
+    ("token", _words(r"access[_ -]?tokens?|bearer|refresh[_ -]?tokens?|jwt")),
+    ("deploy", _words(r"deploy|deploys|deployed|deploying|deployments?")),
+    ("publish", _words(r"publish|npm publish|twine upload")),
+    ("network", _words(r"requests\.(?:get|post)|urllib|fetch\(|http\.client|socket\.")),
+    ("database", _words(r"database|sqlite3?|postgres(?:ql)?|mysql|migrations?")),
+    ("shell", _words(r"subprocess|os\.system|shell=true|exec\(|eval\(")),
+    ("permission", _words(r"chmod|chown|sudo|setuid|permissions?")),
 ]
 
 TEXT_SUFFIXES = {
@@ -273,9 +278,10 @@ class RepoGroundingEngine:
             for filename in sorted(files):
                 full_path = os.path.join(root, filename)
                 lowered_name = filename.lower()
-                if lowered_name in {"dockerfile", "docker-compose.yml", "docker-compose.yaml", "env.example", ".env"}:
+                env_file = lowered_name in {".env", "env.example"} or lowered_name.startswith(".env.")
+                if env_file or lowered_name in {"dockerfile", "docker-compose.yml", "docker-compose.yaml"}:
                     findings.append("Configuration and environment exposure risk")
-                if os.path.splitext(lowered_name)[1] not in TEXT_SUFFIXES:
+                if not env_file and os.path.splitext(lowered_name)[1] not in TEXT_SUFFIXES:
                     continue
                 try:
                     if os.path.getsize(full_path) > 1_000_000:
