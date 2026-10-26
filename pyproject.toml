@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-swarm-core"
+version = "0.2.0"
+description = "Governed runtime for agent swarms: task lifecycle, locks, evidence, approvals and a keyed audit log."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+dependencies = []
+
+[project.scripts]
+swarm = "runtime.cli:main"
+
+[tool.setuptools]
+packages = ["runtime"]

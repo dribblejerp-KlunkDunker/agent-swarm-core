@@ -15,10 +15,15 @@ from .validation import (
     finalize_release_gate,
     run_full_validation,
     validate_approval_required_irreversible_actions,
+    validate_audit_tamper_detection,
+    validate_compound_actions_and_separation_of_duties,
+    validate_durable_state,
     validate_evidence_required_completion,
     validate_invalid_transitions,
     validate_lock_conflicts,
+    validate_production_lifecycle,
     validate_resume_recovery,
+    validate_unblock_cannot_skip_stages,
     verify_benchmark_consistency,
 )
 
@@ -55,5 +60,10 @@ __all__ = [
     "validate_evidence_required_completion",
     "validate_approval_required_irreversible_actions",
     "validate_resume_recovery",
+    "validate_durable_state",
+    "validate_unblock_cannot_skip_stages",
+    "validate_compound_actions_and_separation_of_duties",
+    "validate_production_lifecycle",
+    "validate_audit_tamper_detection",
     "verify_benchmark_consistency",
 ]

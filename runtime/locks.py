@@ -3,9 +3,17 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Set
+from typing import List, Optional, Set
 
 from .storage import SQLiteStateStore, utc_now
+
+
+DEFAULT_LEASE_SECONDS = 1800
+MAX_LEASE_SECONDS = 604800
+
+
+def _is_production() -> bool:
+    return os.environ.get("SWARM_ENV", "").strip().lower() in {"prod", "production"}
 
 
 def _parse_time(value: str) -> datetime:
@@ -23,7 +31,12 @@ class Lock:
 
 
 class LockRegistry:
-    """Cross-process resource locks backed by transactional SQLite storage."""
+    """Cross-process resource locks backed by transactional SQLite storage.
+
+    Locks are leased for DEFAULT_LEASE_SECONDS unless the caller asks otherwise, so a crashed
+    agent cannot hold a resource forever; long work renews its lease. lease_seconds=None
+    reserves a lock that never expires and is refused in production.
+    """
 
     def __init__(
         self,
@@ -34,7 +47,7 @@ class LockRegistry:
         if state_store is not None and db_path is not None:
             raise ValueError("Pass state_store or db_path, not both")
         self.store = state_store or SQLiteStateStore(db_path)
-        if os.environ.get("SWARM_ENV", "").strip().lower() in {"prod", "production"} and not self.store.persistent:
+        if _is_production() and not self.store.persistent:
             raise RuntimeError("A durable SWARM_STATE_DB is required for production resource locks")
 
     @staticmethod
@@ -86,14 +99,16 @@ class LockRegistry:
         owner: str,
         reason: str,
         *,
-        lease_seconds: Optional[int] = None,
+        lease_seconds: Optional[int] = DEFAULT_LEASE_SECONDS,
     ) -> bool:
         normalized = self._normalize(resource)
         task_id = (task_id or "").strip()
         owner = (owner or "").strip()
         if not task_id or not owner or not reason.strip():
             raise ValueError("task_id, owner, and reason must be non-empty")
-        if lease_seconds is not None and (lease_seconds < 1 or lease_seconds > 604800):
+        if lease_seconds is None and _is_production():
+            raise ValueError("Locks without a lease are not allowed in production; pass lease_seconds and renew it")
+        if lease_seconds is not None and (lease_seconds < 1 or lease_seconds > MAX_LEASE_SECONDS):
             raise ValueError("lease_seconds must be between 1 second and 7 days")
 
         now = datetime.now(timezone.utc)
@@ -151,10 +166,10 @@ class LockRegistry:
         task_id: str,
         owner: str,
         *,
-        lease_seconds: int = 300,
+        lease_seconds: int = DEFAULT_LEASE_SECONDS,
     ) -> bool:
         normalized = self._normalize(resource)
-        if lease_seconds < 1 or lease_seconds > 604800:
+        if lease_seconds < 1 or lease_seconds > MAX_LEASE_SECONDS:
             raise ValueError("lease_seconds must be between 1 second and 7 days")
         now = datetime.now(timezone.utc)
         expires_at = (now + timedelta(seconds=lease_seconds)).isoformat(timespec="microseconds")
@@ -231,6 +246,12 @@ class LockRegistry:
                 if self._overlaps(normalized, row["resource"])
             ]
             return max(matches, key=lambda lock: len(lock.resource), default=None)
+
+    def list_lock_records(self) -> List[Lock]:
+        with self.store.transaction() as connection:
+            self._expire_in_transaction(connection, utc_now())
+            rows = connection.execute("SELECT * FROM resource_locks ORDER BY resource").fetchall()
+            return [self._row_to_lock(row) for row in rows]
 
     def list_locks(self) -> Set[str]:
         with self.store.transaction() as connection:

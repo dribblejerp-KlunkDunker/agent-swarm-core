@@ -28,6 +28,9 @@ The runtime package is implemented in `runtime/` and includes:
 - `task_board.py` — durable task board records
 - `benchmark.py` — benchmark scoring and consistency checks
 - `validation.py` — final validation suite for safety and release gates
+- `services.py` — single composition root that keeps every component on one state store
+- `storage.py` — SQLite persistence, schema migrations and the keyed, anchorable audit chain
+- `cli.py` — the `swarm` command-line interface (JSON output, for agents and people)
 
 ## Core architecture documents
 
@@ -75,17 +78,28 @@ Read these in order:
 7. `.agent/FIELD_HARDENING.md`
 8. `.agent/OPERATIONS_RUNBOOK.md`
 
-## Runtime validation
-
-The runtime includes a built-in validation module to check the final safety profile:
+## Install and use
 
 ```bash
-python - <<'PY'
-from runtime.validation import run_full_validation
-results = run_full_validation()
-for result in results:
-    print(result.name, result.passed, result.details)
-PY
+pip install git+https://github.com/dribblejerp-KlunkDunker/agent-swarm-core
+swarm selftest                      # run the runtime's own audit
+swarm ground .                      # repository facts, commands and risk areas
+swarm task create fix-login --owner agent:impl --objective "Fix login redirect" --action merge
+swarm task move fix-login GROUNDED
+swarm lock reserve src/auth --task fix-login --owner agent:impl --reason "edit redirect"
+swarm evidence add fix-login --title tests --file test-output.txt
+swarm approval request fix-login --scope main --approver human:reviewer
+swarm approval check fix-login --scope main
+```
+
+State lives in `.swarm/state.sqlite3` unless `--db` or `SWARM_STATE_DB` says otherwise. Every command prints JSON. `swarm approval approve` needs a person at an interactive terminal; see `.claude/skills/agent-swarm-core/SKILL.md` for the full agent workflow.
+
+## Runtime validation
+
+The runtime includes a built-in validation suite that checks the final safety profile:
+
+```bash
+python -m runtime selftest
 ```
 
 This exercises:
@@ -97,6 +111,11 @@ This exercises:
 - resume/recovery continuity
 - benchmark consistency and scoring stability
 - release gate finalization
+- durable state that survives reopening the database
+- unblocking that cannot skip lifecycle stages
+- compound actions and separation of duties for approvals
+- a full production lifecycle on a real database with a keyed audit chain
+- audit tamper detection: an unkeyed rewrite and a truncated history are both caught
 
 ## Recommended usage
 

@@ -10,6 +10,8 @@ on:
       - "README.md"
       - "SWARM_*.md"
       - "PRODUCTION_HARDENING.md"
+      - "pyproject.toml"
+      - ".claude/**"
       - ".gitignore"
       - ".github/workflows/runtime-validation.yml"
   pull_request:
@@ -21,6 +23,8 @@ on:
       - "README.md"
       - "SWARM_*.md"
       - "PRODUCTION_HARDENING.md"
+      - "pyproject.toml"
+      - ".claude/**"
       - ".gitignore"
       - ".github/workflows/runtime-validation.yml"
   workflow_dispatch:
@@ -59,28 +63,12 @@ jobs:
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
       - name: Run runtime audit
+        # Includes a full production lifecycle on a real database file, keyed-audit tamper
+        # and truncation detection, and the regression checks for every safety gate.
+        run: python -m runtime selftest
+      - name: Verify the package installs and exposes the swarm CLI
         run: |
-          python - <<'PY'
-          from runtime.validation import run_full_validation
-
-          results = run_full_validation()
-          for result in results:
-              status = "PASS" if result.passed else "FAIL"
-              print(f"{status}: {result.name}")
-              for detail in result.details:
-                  print(f"  - {detail}")
-          failures = [result.name for result in results if not result.passed]
-          if failures:
-              raise SystemExit(f"Runtime audit failed: {', '.join(failures)}")
-          PY
-      - name: Verify audit chain integrity
-        run: |
-          python - <<'PY'
-          from runtime.storage import SQLiteStateStore
-
-          store = SQLiteStateStore()
-          result = store.verify_audit_chain()
-          print(result)
-          if not result["valid"]:
-              raise SystemExit("Audit-chain validation failed")
-          PY
+          python -m pip install --quiet .
+          cd "$RUNNER_TEMP"
+          swarm --db "$RUNNER_TEMP/ci-state.sqlite3" task create ci-smoke --owner ci --objective "install check"
+          swarm --db "$RUNNER_TEMP/ci-state.sqlite3" audit verify

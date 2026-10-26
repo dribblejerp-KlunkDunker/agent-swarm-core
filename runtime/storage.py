@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import sqlite3
@@ -9,6 +10,16 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
+
+from .task_state import TaskStatus, TaskStateMachine, unblock_targets
+
+
+AUDIT_MODE_SHA256 = "sha256"
+AUDIT_MODE_HMAC = "hmac-sha256"
+MIN_AUDIT_KEY_LENGTH = 32
+
+# Lifecycle events whose payload carries a {"from": ..., "to": ...} status change.
+TASK_STATUS_EVENTS = ("task.created", "task.state_transition", "task.blocker_added")
 
 
 def utc_now() -> str:
@@ -19,20 +30,36 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
+def _resolve_audit_key(audit_key: Optional[str]) -> Optional[bytes]:
+    raw = audit_key if audit_key is not None else os.environ.get("SWARM_AUDIT_KEY")
+    if raw is None or raw == "":
+        return None
+    if len(raw) < MIN_AUDIT_KEY_LENGTH:
+        raise ValueError(f"SWARM_AUDIT_KEY must be at least {MIN_AUDIT_KEY_LENGTH} characters")
+    return raw.encode("utf-8")
+
+
 class SQLiteStateStore:
     """Transactional SQLite persistence and a tamper-evident append-only audit chain.
 
-    In production, SWARM_STATE_DB must name a durable SQLite file. Development/test
-    instances without a path are isolated in-memory stores and are never production-safe.
+    In production, SWARM_STATE_DB must name a durable SQLite file and SWARM_AUDIT_KEY must
+    hold a secret of at least 32 characters. The key turns the audit chain into an HMAC chain,
+    so someone who can write the database file but does not hold the key cannot rebuild a
+    valid chain after editing it. Development/test instances without a path are isolated
+    in-memory stores and are never production-safe.
     """
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: Optional[str] = None, *, audit_key: Optional[str] = None):
         configured_path = db_path or os.environ.get("SWARM_STATE_DB")
         production = os.environ.get("SWARM_ENV", "").strip().lower() in {"prod", "production"}
         if production and (not configured_path or configured_path == ":memory:"):
             raise RuntimeError("SWARM_STATE_DB must point to a durable SQLite database in production")
+        self._audit_key = _resolve_audit_key(audit_key)
+        if production and self._audit_key is None:
+            raise RuntimeError("SWARM_AUDIT_KEY must be set in production so the audit chain is keyed")
+        self.audit_mode = AUDIT_MODE_HMAC if self._audit_key else AUDIT_MODE_SHA256
 
         self.path: Optional[Path]
         self._memory_connection: Optional[sqlite3.Connection] = None
@@ -198,25 +225,76 @@ class SQLiteStateStore:
             CREATE INDEX IF NOT EXISTS idx_evidence_task ON evidence_bundles(task_id, id);
             """
         )
-        row = connection.execute(
-            "SELECT value FROM metadata WHERE key = 'schema_version'"
-        ).fetchone()
-        if row is None:
-            connection.execute(
-                "INSERT INTO metadata(key, value) VALUES('schema_version', ?)",
-                (str(self.SCHEMA_VERSION),),
-            )
-        else:
-            version = int(row["value"])
-            if version > self.SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"State database schema {version} is newer than supported schema {self.SCHEMA_VERSION}"
-                )
-            if version < self.SCHEMA_VERSION:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = connection.execute(
+                "SELECT value FROM metadata WHERE key = 'schema_version'"
+            ).fetchone()
+            if row is None:
+                # Fresh database: every table already has the current shape.
                 connection.execute(
-                    "UPDATE metadata SET value=? WHERE key='schema_version'",
+                    "INSERT INTO metadata(key, value) VALUES('schema_version', ?)",
                     (str(self.SCHEMA_VERSION),),
                 )
+                connection.execute(
+                    "INSERT INTO metadata(key, value) VALUES('audit_hash_mode', ?)",
+                    (self.audit_mode,),
+                )
+            else:
+                version = int(row["value"])
+                if version > self.SCHEMA_VERSION:
+                    raise RuntimeError(
+                        f"State database schema {version} is newer than supported schema {self.SCHEMA_VERSION}"
+                    )
+                for target in range(version + 1, self.SCHEMA_VERSION + 1):
+                    self._MIGRATIONS[target](self, connection)
+                    connection.execute(
+                        "UPDATE metadata SET value=? WHERE key='schema_version'", (str(target),)
+                    )
+            self._check_audit_mode(connection)
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+
+    def _migrate_to_v2(self, connection: sqlite3.Connection) -> None:
+        # Version 2 only added tables and indexes, which CREATE ... IF NOT EXISTS has applied.
+        return None
+
+    def _migrate_to_v3(self, connection: sqlite3.Connection) -> None:
+        # Chains written before version 3 were always unkeyed SHA-256 chains.
+        connection.execute(
+            "INSERT OR IGNORE INTO metadata(key, value) VALUES('audit_hash_mode', ?)",
+            (AUDIT_MODE_SHA256,),
+        )
+
+    _MIGRATIONS = {2: _migrate_to_v2, 3: _migrate_to_v3}
+
+    def _check_audit_mode(self, connection: sqlite3.Connection) -> None:
+        stored = connection.execute("SELECT value FROM metadata WHERE key='audit_hash_mode'").fetchone()
+        stored_mode = stored["value"] if stored else AUDIT_MODE_SHA256
+        if stored_mode == self.audit_mode:
+            return
+        has_events = connection.execute("SELECT 1 FROM audit_events LIMIT 1").fetchone() is not None
+        if self.audit_mode == AUDIT_MODE_HMAC and stored_mode == AUDIT_MODE_SHA256 and not has_events:
+            connection.execute(
+                "INSERT INTO metadata(key, value) VALUES('audit_hash_mode', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (AUDIT_MODE_HMAC,),
+            )
+            return
+        if stored_mode == AUDIT_MODE_HMAC:
+            raise RuntimeError("This state database has a keyed audit chain; set SWARM_AUDIT_KEY to open it")
+        raise RuntimeError(
+            "This state database has an unkeyed audit chain and SWARM_AUDIT_KEY is set; "
+            "archive it and start a new database rather than mixing chain modes"
+        )
+
+    def _event_hash(self, previous_hash: str, signed_fields: Dict[str, Any]) -> str:
+        message = (previous_hash + "\n" + _canonical_json(signed_fields)).encode("utf-8")
+        if self._audit_key is not None:
+            return hmac.new(self._audit_key, message, hashlib.sha256).hexdigest()
+        return hashlib.sha256(message).hexdigest()
 
     def append_event_in_transaction(
         self,
@@ -244,9 +322,7 @@ class SQLiteStateStore:
             "payload_json": payload_json,
             "previous_hash": previous_hash,
         }
-        event_hash = hashlib.sha256(
-            (previous_hash + "\n" + _canonical_json(signed_fields)).encode("utf-8")
-        ).hexdigest()
+        event_hash = self._event_hash(previous_hash, signed_fields)
         connection.execute(
             """
             INSERT INTO audit_events(
@@ -296,7 +372,51 @@ class SQLiteStateStore:
             for row in rows
         ]
 
-    def verify_audit_chain(self) -> Dict[str, Any]:
+    def audit_checkpoint(self) -> Dict[str, Any]:
+        """Return the newest (sequence, hash) pair for storage outside this database.
+
+        Pass an exported checkpoint back to verify_audit_chain(anchor=...) to detect a
+        rewritten or truncated history, which the chain alone cannot reveal.
+        """
+        with self.read_connection() as connection:
+            row = connection.execute(
+                "SELECT sequence, event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+        return {
+            "sequence": int(row["sequence"]) if row else 0,
+            "event_hash": row["event_hash"] if row else "GENESIS",
+            "audit_mode": self.audit_mode,
+            "created_at": utc_now(),
+        }
+
+    def verify_audit_chain(self, anchor: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        result = self._verify_chain_links()
+        if not result["valid"] or anchor is None:
+            return result
+        try:
+            anchor_sequence = int(anchor["sequence"])
+            anchor_hash = str(anchor["event_hash"])
+        except (KeyError, TypeError, ValueError):
+            return {"valid": False, "events": result["events"], "error": "malformed audit anchor"}
+        if anchor.get("audit_mode", self.audit_mode) != self.audit_mode:
+            return {"valid": False, "events": result["events"], "error": "audit anchor mode mismatch"}
+        if anchor_sequence == 0:
+            return result
+        if anchor_sequence > result["events"]:
+            return {"valid": False, "events": result["events"], "error": f"audit history truncated before anchor {anchor_sequence}"}
+        with self.read_connection() as connection:
+            row = connection.execute(
+                "SELECT event_hash FROM audit_events WHERE sequence=?", (anchor_sequence,)
+            ).fetchone()
+        if row is None or row["event_hash"] != anchor_hash:
+            return {"valid": False, "events": result["events"], "error": f"audit anchor mismatch at {anchor_sequence}"}
+        return result
+
+    def _verify_chain_links(self) -> Dict[str, Any]:
+        with self.read_connection() as connection:
+            stored = connection.execute("SELECT value FROM metadata WHERE key='audit_hash_mode'").fetchone()
+        if stored is not None and stored["value"] != self.audit_mode:
+            return {"valid": False, "events": 0, "error": "audit hash mode changed"}
         previous_hash = "GENESIS"
         expected_sequence = 1
         verified_count = 0
@@ -319,10 +439,8 @@ class SQLiteStateStore:
                     "payload_json": payload_json,
                     "previous_hash": previous_hash,
                 }
-                expected_hash = hashlib.sha256(
-                    (previous_hash + "\n" + _canonical_json(signed_fields)).encode("utf-8")
-                ).hexdigest()
-                if event["event_hash"] != expected_hash:
+                expected_hash = self._event_hash(previous_hash, signed_fields)
+                if not hmac.compare_digest(event["event_hash"], expected_hash):
                     return {"valid": False, "events": verified_count, "error": f"event hash mismatch at {expected_sequence}"}
                 previous_hash = event["event_hash"]
                 expected_sequence += 1
@@ -331,9 +449,12 @@ class SQLiteStateStore:
                 break
         return {"valid": True, "events": verified_count, "error": None}
 
-    def verify_task_status(self, task_id: str, expected_status: str) -> bool:
-        """Reconcile durable task state with its append-only lifecycle history."""
-        if not self.verify_audit_chain()["valid"]:
+    def verify_task_status(self, task_id: str, expected_status: str, *, chain_verified: bool = False) -> bool:
+        """Reconcile durable task state with its append-only lifecycle history.
+
+        Pass chain_verified=True only when the caller verified the audit chain in the same operation.
+        """
+        if not chain_verified and not self.verify_audit_chain()["valid"]:
             return False
         serialized = self.get_task_json(task_id)
         if serialized is None:
@@ -345,30 +466,47 @@ class SQLiteStateStore:
         with self.read_connection() as connection:
             rows = connection.execute(
                 "SELECT sequence, event_type, payload_json FROM audit_events "
-                "WHERE task_id=? AND event_type IN ('task.created', 'task.state_transition') ORDER BY sequence",
-                (task_id,),
+                f"WHERE task_id=? AND event_type IN ({','.join('?' for _ in TASK_STATUS_EVENTS)}) ORDER BY sequence",
+                (task_id, *TASK_STATUS_EVENTS),
             ).fetchall()
         if not rows or rows[0]["event_type"] != "task.created":
             return False
         if sum(row["event_type"] == "task.created" for row in rows) != 1:
             return False
+        # Replay the history under the state machine's rules, so a rewritten task row cannot
+        # smuggle in a transition (or a blocked_from) that the runtime would have refused.
         try:
-            status = json.loads(rows[0]["payload_json"]).get("status")
+            status = TaskStatus(json.loads(rows[0]["payload_json"]).get("status"))
+            blocked_from = ""
             for row in rows[1:]:
                 event = json.loads(row["payload_json"])
-                if row["event_type"] != "task.state_transition" or event.get("from") != status:
+                if row["event_type"] == "task.created" or event.get("from") != status.value:
                     return False
-                target = event.get("to")
-                if not isinstance(target, str):
+                target = TaskStatus(event.get("to"))
+                if row["event_type"] == "task.blocker_added":
+                    if target != TaskStatus.BLOCKED:
+                        return False
+                elif not TaskStateMachine.can_transition(status, target):
                     return False
+                elif status == TaskStatus.BLOCKED and target not in {TaskStatus.BLOCKED, TaskStatus.CANCELLED}:
+                    if target not in unblock_targets(blocked_from):
+                        return False
+                    blocked_from = ""
+                if target == TaskStatus.BLOCKED and status != TaskStatus.BLOCKED:
+                    blocked_from = status.value
                 status = target
-        except (TypeError, json.JSONDecodeError):
+        except (TypeError, ValueError, json.JSONDecodeError):
             return False
-        return isinstance(status, str) and status == expected_status == payload.get("status")
+        return (
+            status.value == expected_status == payload.get("status")
+            and blocked_from == payload.get("blocked_from", "")
+        )
 
-    def verify_evidence_state(self, task_id: str, references: Optional[List[str]] = None) -> bool:
+    def verify_evidence_state(
+        self, task_id: str, references: Optional[List[str]] = None, *, chain_verified: bool = False
+    ) -> bool:
         """Verify persisted evidence bytes and status against the audit history."""
-        if not self.verify_audit_chain()["valid"]:
+        if not chain_verified and not self.verify_audit_chain()["valid"]:
             return False
         with self.read_connection() as connection:
             evidence_rows = connection.execute(
@@ -464,6 +602,9 @@ class SQLiteStateStore:
         updated_at: str,
         actor: Optional[str] = None,
     ) -> None:
+        """Low-level upsert with no lifecycle checks; RuntimeServices is the checked path."""
+        if os.environ.get("SWARM_ENV", "").strip().lower() in {"prod", "production"}:
+            raise RuntimeError("Raw task writes bypass lifecycle checks; use RuntimeServices in production")
         with self.transaction() as connection:
             connection.execute(
                 """
@@ -478,7 +619,7 @@ class SQLiteStateStore:
                 "task.persisted",
                 task_id=task_id,
                 actor=actor,
-                payload={"updated_at": updated_at},
+                payload={"updated_at": updated_at, "lifecycle_checked": False},
             )
 
     def get_task_json(self, task_id: str) -> Optional[str]:

@@ -8,10 +8,15 @@ This is an engineering hardening baseline, not a security certification. Review 
 
 ## Mandatory production configuration
 
-Set both variables before constructing runtime components:
+Set all three variables before constructing runtime components:
 
 - SWARM_ENV=production
 - SWARM_STATE_DB=/absolute/path/to/swarm-state.sqlite3
+- SWARM_AUDIT_KEY=<a secret of at least 32 characters, from your secrets manager>
+
+The audit key turns the audit log into an HMAC chain. Inject it at process start from a secrets manager; never store it next to the database or in the repository. Losing the key means the existing chain can no longer be verified, so back it up with the same care as the database. A database written without a key cannot later be opened with one (and vice versa): the runtime refuses rather than mixing chain modes, so archive an unkeyed development database and start a new one for production.
+
+**Upgrading an existing production database:** a database created before the keyed chain existed, with audit events in it, will not open once SWARM_AUDIT_KEY is set. Verify its chain one last time, archive it read-only with its final checkpoint, and start a new database. Open tasks must be re-created in the new database and taken through their stages again.
 
 The database path must be on a durable local filesystem. The runtime rejects missing paths and in-memory storage when production mode is enabled. SQLite database files are restricted to owner read/write on POSIX systems; store the file in a directory owned by the runtime service account with directory permissions 0700. Back up the database consistently and test restores.
 
@@ -34,13 +39,17 @@ Example contract (illustrative; connect it to the application's real identity la
             and approval_record.scope in principal.allowed_release_scopes
         )
 
-The application must call ApprovalGate.approve(task_id, approver=authenticated_subject, evidence=current_evidence) only after interactive or service-to-service authentication. A valid approval is bound to the requested action, exact scope, evidence digest, expiry, approver, and an audit event hash. Replacing the approval row without the corresponding audit proof is rejected.
+The application must call ApprovalGate.approve(task_id, approver=authenticated_subject, evidence=current_evidence) only after interactive or service-to-service authentication. A valid approval is bound to the requested action, exact scope, evidence digest, expiry, approver, requester, and an audit event hash. Replacing the approval row without the corresponding audit proof is rejected.
+
+Request approvals through RuntimeServices.request_approval(task, scope=..., approver=...). It records the task owner as the requester, and the requester can never approve. In production, can_proceed reads the task's durable owner and denies the action unless the requester is that owner and the approver is someone else (identities compare case-insensitively), so an approval requested directly on the gate with an invented requester cannot be used to act.
+
+Actions are matched by category. An action string that names more than one irreversible category, such as "merge and deploy", becomes a compound action that only an approval for that same compound action can satisfy.
 
 ## Resource locking
 
 Use the same SWARM_STATE_DB for every runtime component on a host. Resource identities must be normalized and consistent; use repository-relative POSIX paths for files and directories and documented stable identifiers for external resources.
 
-Locks without a lease remain held until explicitly released by the same task and owner. For leased work, choose a duration appropriate to the task and renew it before expiry. Do not choose a short lease without implementing a heartbeat. An expired lease is removed and audited when a lock API next checks state. Recover permanent stale locks only after confirming the original owner/process is no longer active.
+Locks are leased for 30 minutes unless the caller chooses another duration (up to 7 days). Renew the lease before it expires during long work; do not choose a short lease without implementing a heartbeat. An expired lease is removed and audited when a lock API next checks state, so a crashed agent cannot hold a resource forever. Locks without a lease are refused in production.
 
 These locks coordinate cooperating runtime processes; they do not prevent an unrelated process from editing files outside the runtime.
 
@@ -48,7 +57,11 @@ These locks coordinate cooperating runtime processes; they do not prevent an unr
 
 Evidence is stored in SQLite and starts in PENDING; only the registry can change it to VERIFIED. Registry reads return detached values so modifying a returned Python object cannot change stored status. Evidence content may contain confidential information: store only material that is necessary, prohibit secrets and credentials, restrict database access, and encrypt the storage volume/backups according to the deployment policy.
 
-The audit log is append-only through the runtime API and hash-chained. SQLiteStateStore.verify_audit_chain() detects modification or reordering of logged events. This is **tamper-evident, not tamper-proof**: a host administrator who can rewrite the entire database can recalculate the chain, and deletion of a tail is not detectable without an external anchor. For a stronger audit boundary, export periodic sequence/hash checkpoints to an independently controlled immutable log service or storage account.
+The audit log is append-only through the runtime API and HMAC-chained in production. SQLiteStateStore.verify_audit_chain() detects modification or reordering of logged events. Without the audit key, someone who can write the database file cannot recompute a valid chain after editing it.
+
+Deleting the newest events is still invisible to the chain alone. Export checkpoints regularly with SQLiteStateStore.audit_checkpoint() (or `swarm audit checkpoint --out <file>`) to storage the database host cannot rewrite, and verify against the latest one with verify_audit_chain(anchor=checkpoint) or `swarm audit verify --anchor <file>`. RuntimeServices.health_check(audit_anchor=...) includes the anchor in its readiness verdict. This is **tamper-evident, not tamper-proof**: someone holding the key and write access to both the database and every checkpoint store can still rewrite history.
+
+Task records must change only through RuntimeServices in production. TaskBoard.add_or_update(), TaskBoard.save() and SQLiteStateStore.put_task_json() write without lifecycle checks and raise in production; in development they are allowed and logged with lifecycle_checked=false. Independently of that, the production release check replays each task's audit history under the state machine's rules, so a task row rewritten outside the runtime (for example to fake where a task was blocked from) fails the check.
 
 Never place passwords, access tokens, API keys, private keys, credential values, or raw secrets in approval notes, lock reasons, evidence titles, task objectives, logs, or audit payloads. Keep evidence references concise and content out of ordinary audit events.
 
@@ -67,7 +80,7 @@ Restoring a task board does not authorize resumed work. Revalidate state, approv
 
 ## CI and repository governance
 
-The Runtime Validation workflow runs regression tests, bytecode compilation, the runtime audit, and an audit-chain check with read-only repository permissions. Its third-party actions are pinned to full commit SHAs, and execution is bounded by a timeout.
+The Runtime Validation workflow runs regression tests, bytecode compilation, and the runtime audit (`python -m runtime selftest`) with read-only repository permissions. The audit drives a full production lifecycle against a real database file with a keyed chain, and proves that an unkeyed rewrite and a truncated history are both detected. A final step installs the package and runs the `swarm` CLI. Its third-party actions are pinned to full commit SHAs, and execution is bounded by a timeout.
 
 **GitHub branch protection is a repository setting and is not changed by this code commit.** Before treating main as a protected production branch, open Repository Settings, then Branches or Rulesets, and apply a rule to main that:
 - requires pull requests for changes,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -17,6 +18,32 @@ class RepoFact:
     risks: List[str]
     unknowns: List[str]
     evidence: List[str] = field(default_factory=list)
+
+
+def _words(alternation: str) -> "re.Pattern[str]":
+    # Letters and digits bound a word but "_" does not, so snake_case names such as
+    # db_password still match while ordinary words such as "author" or "tokenize" do not.
+    return re.compile(rf"(?<![a-z0-9])(?:{alternation})(?![a-z0-9])")
+
+
+RISK_PATTERNS = [
+    ("auth", _words(r"auth|authn|authz|oauth2?|authenticat[a-z]*|authori[sz][a-z]*|login")),
+    ("security", _words(r"security|vulnerabilit(?:y|ies)|cve-\d{4}-\d+")),
+    ("secret", _words(r"secrets?|private[_ -]?keys?|api[_ -]?keys?|passwords?|passwd")),
+    ("token", _words(r"access[_ -]?tokens?|bearer|refresh[_ -]?tokens?|jwt")),
+    ("deploy", _words(r"deploy|deploys|deployed|deploying|deployments?")),
+    ("publish", _words(r"publish|npm publish|twine upload")),
+    ("network", _words(r"requests\.(?:get|post)|urllib|fetch\(|http\.client|socket\.")),
+    ("database", _words(r"database|sqlite3?|postgres(?:ql)?|mysql|migrations?")),
+    ("shell", _words(r"subprocess|os\.system|shell=true|exec\(|eval\(")),
+    ("permission", _words(r"chmod|chown|sudo|setuid|permissions?")),
+]
+
+TEXT_SUFFIXES = {
+    "", ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".kt", ".rb",
+    ".php", ".cs", ".c", ".h", ".cpp", ".hpp", ".swift", ".gd", ".sh", ".bash", ".yml", ".yaml",
+    ".toml", ".json", ".ini", ".cfg", ".env", ".sql", ".tf", ".md", ".txt", ".rst",
+}
 
 
 class RepoGroundingEngine:
@@ -74,7 +101,7 @@ class RepoGroundingEngine:
         manifests = {
             "package.json", "pyproject.toml", "setup.py", "requirements.txt", "Cargo.toml",
             "go.mod", "pom.xml", "build.gradle", "build.gradle.kts", "composer.json",
-            "Gemfile", "mix.exs",
+            "Gemfile", "mix.exs", "project.godot",
         }
         found: List[str] = []
         for root, dirs, files in os.walk(self.repo_root):
@@ -107,11 +134,16 @@ class RepoGroundingEngine:
             return "php"
         if any(path.endswith("gemfile") for path in lowered):
             return "ruby"
+        if any(path.endswith("project.godot") for path in lowered):
+            return "godot"
         return "UNKNOWN"
 
     def _pick_key_files(self, manifests: List[str]) -> List[str]:
         observed = list(manifests)
-        wanted = {"README.md", "package.json", "pyproject.toml", "Cargo.toml", "go.mod", "pom.xml", "requirements.txt"}
+        wanted = {
+            "README.md", "CLAUDE.md", "package.json", "pyproject.toml", "Cargo.toml", "go.mod",
+            "pom.xml", "requirements.txt", "project.godot",
+        }
         for root, dirs, files in os.walk(self.repo_root):
             dirs[:] = [directory for directory in dirs if directory not in self.EXCLUDED_DIRS]
             for name in files:
@@ -138,6 +170,25 @@ class RepoGroundingEngine:
             if len(line) > 20 and not line.startswith("#"):
                 return line[:180]
         return "Repository purpose is not explicitly described in README."
+
+    def _godot_script_runners(self, project_root: str) -> List[str]:
+        """Repository-relative scripts that run headless because they extend SceneTree."""
+        runners: List[str] = []
+        for root, dirs, files in os.walk(project_root):
+            dirs[:] = [d for d in dirs if d not in self.EXCLUDED_DIRS and d not in {"addons", ".godot"}]
+            for filename in sorted(files):
+                if not filename.endswith(".gd"):
+                    continue
+                path = os.path.join(root, filename)
+                try:
+                    with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                        head = [line.strip() for line in handle.readlines()[:20]]
+                except OSError:
+                    continue
+                code = [line for line in head if line and not line.startswith("#")]
+                if code and code[0] == "extends SceneTree":
+                    runners.append(os.path.relpath(path, project_root).replace(os.sep, "/"))
+        return sorted(runners)
 
     def _has_tests(self, project_root: str) -> bool:
         for root, dirs, files in os.walk(project_root):
@@ -211,22 +262,27 @@ class RepoGroundingEngine:
                 commands.append("./gradlew test" if os.path.isfile(wrapper) else "gradle test")
             if lower.endswith("composer.json"):
                 commands.append("composer install")
+            if lower.endswith("project.godot"):
+                # The engine binary name varies per install; "godot" stands for it.
+                project = os.path.relpath(manifest_dir, self.repo_root).replace(os.sep, "/")
+                commands.append(f"godot --headless --path {project} --import")
+                for runner in self._godot_script_runners(manifest_dir):
+                    commands.append(f"godot --headless --path {project} --script res://{runner}")
 
         return list(dict.fromkeys(commands))
 
     def _detect_risks(self) -> List[str]:
-        risk_terms = [
-            "auth", "security", "secret", "token", "deploy", "publish", "network",
-            "database", "shell", "permission",
-        ]
         findings: List[str] = []
         for root, dirs, files in os.walk(self.repo_root):
             dirs[:] = [directory for directory in dirs if directory not in self.EXCLUDED_DIRS]
-            for filename in files:
+            for filename in sorted(files):
                 full_path = os.path.join(root, filename)
                 lowered_name = filename.lower()
-                if lowered_name in {"dockerfile", "docker-compose.yml", "docker-compose.yaml", "env.example", ".env"}:
+                env_file = lowered_name in {".env", "env.example"} or lowered_name.startswith(".env.")
+                if env_file or lowered_name in {"dockerfile", "docker-compose.yml", "docker-compose.yaml"}:
                     findings.append("Configuration and environment exposure risk")
+                if not env_file and os.path.splitext(lowered_name)[1] not in TEXT_SUFFIXES:
+                    continue
                 try:
                     if os.path.getsize(full_path) > 1_000_000:
                         continue
@@ -234,10 +290,9 @@ class RepoGroundingEngine:
                         content = handle.read().lower()
                 except OSError:
                     continue
-                for term in risk_terms:
-                    if term in content:
+                for term, pattern in RISK_PATTERNS:
+                    if pattern.search(content):
                         findings.append(f"Potential risk area: {term}")
-                        break
         return list(dict.fromkeys(findings))[:10]
 
     def _detect_unknowns(self, manifests: List[str], readme_text: str) -> List[str]:

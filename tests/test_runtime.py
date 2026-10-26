@@ -119,14 +119,23 @@ class ApprovalGateTests(unittest.TestCase):
     def test_identity_authorizer_is_required_in_production(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             db_path = str(Path(directory) / "approval.sqlite3")
-            with patch.dict(os.environ, {"SWARM_ENV": "production", "SWARM_STATE_DB": db_path}):
+            env = {"SWARM_ENV": "production", "SWARM_STATE_DB": db_path, "SWARM_AUDIT_KEY": "k" * 32}
+            with patch.dict(os.environ, env):
                 gate = ApprovalGate()
                 gate.request("prod-approval", "deploy", "production", "idp:user-1", evidence=["review"])
                 self.assertFalse(gate.approve("prod-approval", approver="idp:user-1", evidence=["review"]))
                 authorized_gate = ApprovalGate(
                     approver_authorizer=lambda actor, record: actor.startswith("idp:") and actor == record.approver
                 )
-                authorized_gate.request("prod-authorized", "deploy", "production", "idp:user-1", evidence=["review"])
+                # Production approvals also need a durable task whose owner made the request.
+                authorized_gate.store.append_event("task.created", task_id="prod-authorized", actor="agent:owner")
+                with authorized_gate.store.transaction() as connection:
+                    connection.execute(
+                        "INSERT INTO tasks(task_id, payload_json, updated_at) VALUES(?, ?, ?)",
+                        ("prod-authorized", json.dumps({"owner": "agent:owner"}), "now"),
+                    )
+                authorized_gate.request("prod-authorized", "deploy", "production", "idp:user-1",
+                                        evidence=["review"], requester="agent:owner")
                 self.assertTrue(
                     authorized_gate.approve("prod-authorized", approver="idp:user-1", evidence=["review"])
                 )
@@ -240,7 +249,10 @@ class EvidenceAndStateTests(unittest.TestCase):
         self.assertEqual(task.status, TaskStatus.RELEASED)
 
     def test_blocked_task_requires_unblock_justification(self) -> None:
-        task = TaskRecord(task_id="blocked", owner="owner", objective="unblock", status=TaskStatus.BLOCKED)
+        task = TaskRecord(
+            task_id="blocked", owner="owner", objective="unblock",
+            status=TaskStatus.BLOCKED, blocked_from=TaskStatus.IN_PROGRESS.value,
+        )
         with self.assertRaisesRegex(ValueError, "justification"):
             TaskStateMachine.transition(task, TaskStatus.IN_PROGRESS)
         TaskStateMachine.transition(task, TaskStatus.IN_PROGRESS, justification="dependency restored")

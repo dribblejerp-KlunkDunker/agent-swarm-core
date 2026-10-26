@@ -35,10 +35,36 @@ VALID_TRANSITIONS: Dict[TaskStatus, List[TaskStatus]] = {
     TaskStatus.READY_FOR_RELEASE: [TaskStatus.AWAITING_APPROVAL, TaskStatus.BLOCKED, TaskStatus.CANCELLED],
     TaskStatus.AWAITING_APPROVAL: [TaskStatus.RELEASED, TaskStatus.BLOCKED, TaskStatus.CANCELLED],
     TaskStatus.RELEASED: [TaskStatus.CLOSED, TaskStatus.BLOCKED, TaskStatus.CANCELLED],
-    TaskStatus.BLOCKED: [TaskStatus.GROUNDED, TaskStatus.PLANNED, TaskStatus.READY, TaskStatus.IN_PROGRESS, TaskStatus.CANCELLED],
+    TaskStatus.BLOCKED: [
+        TaskStatus.INTAKE, TaskStatus.GROUNDED, TaskStatus.PLANNED, TaskStatus.READY,
+        TaskStatus.IN_PROGRESS, TaskStatus.CANCELLED,
+    ],
     TaskStatus.CANCELLED: [TaskStatus.CANCELLED],
     TaskStatus.CLOSED: [TaskStatus.CLOSED],
 }
+
+# Forward order of the lifecycle. Unblocking may return a task to the stage it was blocked
+# from or an earlier one, never past it; later stages re-enter through VERIFYING.
+LIFECYCLE_ORDER: List[TaskStatus] = [
+    TaskStatus.INTAKE, TaskStatus.GROUNDED, TaskStatus.PLANNED, TaskStatus.READY,
+    TaskStatus.IN_PROGRESS, TaskStatus.VERIFYING, TaskStatus.READY_FOR_RELEASE,
+    TaskStatus.AWAITING_APPROVAL, TaskStatus.RELEASED,
+]
+
+
+def unblock_targets(blocked_from: str) -> List[TaskStatus]:
+    """States a blocked task may resume to; an unknown origin restarts at INTAKE."""
+    try:
+        origin = TaskStatus(blocked_from)
+    except ValueError:
+        origin = TaskStatus.INTAKE
+    if origin not in LIFECYCLE_ORDER:
+        origin = TaskStatus.INTAKE
+    limit = LIFECYCLE_ORDER.index(origin)
+    return [
+        state for state in VALID_TRANSITIONS[TaskStatus.BLOCKED]
+        if state in LIFECYCLE_ORDER and LIFECYCLE_ORDER.index(state) <= limit
+    ]
 
 
 @dataclass
@@ -55,6 +81,7 @@ class TaskRecord:
     branch: str = ""
     risk_level: str = "LOW"
     approval_action: str = "release"
+    blocked_from: str = ""
     created_at: str = field(default_factory=_utc_now)
     updated_at: str = field(default_factory=_utc_now)
 
@@ -90,6 +117,13 @@ class TaskStateMachine:
         if task.status == TaskStatus.BLOCKED and new_state != TaskStatus.CANCELLED:
             if not justification or not justification.strip():
                 raise ValueError("A blocked task requires an explicit unblock justification")
+            allowed = unblock_targets(task.blocked_from)
+            if new_state not in allowed:
+                origin = task.blocked_from or "an unknown state"
+                raise ValueError(
+                    f"Task {task.task_id} was blocked from {origin} and may only resume to "
+                    f"{', '.join(state.value for state in allowed)}"
+                )
 
         if new_state == TaskStatus.READY_FOR_RELEASE:
             if not task.evidence:
@@ -125,6 +159,12 @@ class TaskStateMachine:
             ):
                 raise ValueError("Release is blocked: matching, current approval and evidence are required")
 
+        if new_state == TaskStatus.BLOCKED:
+            task.blocked_from = task.status.value
+        elif task.status == TaskStatus.BLOCKED and new_state != TaskStatus.CANCELLED:
+            # The justification resolves the blockers; the audit log keeps their history.
+            task.blockers = []
+            task.blocked_from = ""
         task.status = new_state
         task.updated_at = _utc_now()
 
@@ -134,6 +174,8 @@ class TaskStateMachine:
             raise ValueError(f"Cannot block terminal task {task.task_id} in state {task.status.value}")
         if blocker not in task.blockers:
             task.blockers.append(blocker)
+        if task.status != TaskStatus.BLOCKED:
+            task.blocked_from = task.status.value
         task.status = TaskStatus.BLOCKED
         task.updated_at = _utc_now()
 
