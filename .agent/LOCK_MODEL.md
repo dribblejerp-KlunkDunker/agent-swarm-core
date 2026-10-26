@@ -48,6 +48,8 @@ Required steps:
 - no task may edit a file without a corresponding lock
 - the same resource cannot be locked by multiple active tasks
 - a task may only release its own active lock
+- locks are leased (30 minutes by default) and must be renewed during long work; an expired lease is removed and audited, so a crashed agent cannot hold a resource forever
+- locks without a lease are a development convenience and are refused in production
 - if a task is blocked or abandoned, the lock must be released or explicitly transferred
 - a conflict on a lock requires orchestrator review and a decision record
 

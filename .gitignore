@@ -15,3 +15,6 @@ __pycache__/
 .mypy_cache/
 .venv/
 venv/
+.swarm/
+build/
+*.egg-info/

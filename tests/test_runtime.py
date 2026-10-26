@@ -119,7 +119,8 @@ class ApprovalGateTests(unittest.TestCase):
     def test_identity_authorizer_is_required_in_production(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             db_path = str(Path(directory) / "approval.sqlite3")
-            with patch.dict(os.environ, {"SWARM_ENV": "production", "SWARM_STATE_DB": db_path}):
+            env = {"SWARM_ENV": "production", "SWARM_STATE_DB": db_path, "SWARM_AUDIT_KEY": "k" * 32}
+            with patch.dict(os.environ, env):
                 gate = ApprovalGate()
                 gate.request("prod-approval", "deploy", "production", "idp:user-1", evidence=["review"])
                 self.assertFalse(gate.approve("prod-approval", approver="idp:user-1", evidence=["review"]))
@@ -240,7 +241,10 @@ class EvidenceAndStateTests(unittest.TestCase):
         self.assertEqual(task.status, TaskStatus.RELEASED)
 
     def test_blocked_task_requires_unblock_justification(self) -> None:
-        task = TaskRecord(task_id="blocked", owner="owner", objective="unblock", status=TaskStatus.BLOCKED)
+        task = TaskRecord(
+            task_id="blocked", owner="owner", objective="unblock",
+            status=TaskStatus.BLOCKED, blocked_from=TaskStatus.IN_PROGRESS.value,
+        )
         with self.assertRaisesRegex(ValueError, "justification"):
             TaskStateMachine.transition(task, TaskStatus.IN_PROGRESS)
         TaskStateMachine.transition(task, TaskStatus.IN_PROGRESS, justification="dependency restored")

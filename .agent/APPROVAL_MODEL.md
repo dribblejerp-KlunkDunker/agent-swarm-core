@@ -41,6 +41,8 @@ expires_at:
 
 - approval is explicit, not implied
 - approval applies to a specific action and scope
+- an action that names several irreversible categories ("merge and deploy") is a compound action and needs its own approval; approving one part never authorises the whole
+- the requester (normally the task owner) can never be the approver; production refuses approvals that were not requested with a recorded requester
 - approval must be recorded before execution
 - if evidence changes after approval, re-approval is required
 - if the task becomes blocked, approval is re-evaluated

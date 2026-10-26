@@ -7,38 +7,59 @@ import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from .storage import SQLiteStateStore, utc_now
 
 
+_MUTATION_WORDS = {"rotation", "rotate", "change", "update", "modify", "mutation", "write"}
+_DESTRUCTIVE_WORDS = {
+    "destructive", "destroy", "delete", "drop", "truncate", "wipe", "purge", "erase", "rm", "force",
+}
+
+
+def _action_categories(tokens: Set[str]) -> List[str]:
+    categories: List[str] = []
+    if "merge" in tokens:
+        categories.append("merge")
+    if tokens & {"deploy", "deployment"}:
+        categories.append("deploy")
+    if "publish" in tokens:
+        categories.append("publish")
+    if "release" in tokens:
+        categories.append("release")
+    if tokens & {"migration", "migrate"}:
+        categories.append("migration")
+    if "secret" in tokens and tokens & _MUTATION_WORDS:
+        categories.append("secret-rotation")
+    if "credential" in tokens and tokens & _MUTATION_WORDS:
+        categories.append("credential-rotation")
+    if tokens & _DESTRUCTIVE_WORDS:
+        categories.append("destructive-action")
+    if "external" in tokens and "write" in tokens:
+        categories.append("external-write")
+    if "environment" in tokens and tokens & _MUTATION_WORDS:
+        categories.append("environment-mutation")
+    if "production" in tokens and tokens & _MUTATION_WORDS:
+        categories.append("production-change")
+    return categories
+
+
 def _canonical_action(action: str) -> str:
+    """Map an action description to the irreversible category it belongs to.
+
+    A description that names more than one category ("merge and deploy") becomes a compound
+    key such as "compound:deploy+merge". It never matches an approval for one of its parts,
+    so approving a merge cannot authorise a deploy smuggled into the same action string.
+    """
     normalized = re.sub(r"[^a-z0-9]+", "-", (action or "").strip().lower()).strip("-")
     if not normalized:
         return ""
-    tokens = set(normalized.split("-"))
-    if "merge" in tokens:
-        return "merge"
-    if "deploy" in tokens or "deployment" in tokens:
-        return "deploy"
-    if "publish" in tokens:
-        return "publish"
-    if "release" in tokens:
-        return "release"
-    if "migration" in tokens or "migrate" in tokens:
-        return "migration"
-    if "secret" in tokens and tokens.intersection({"rotation", "rotate", "change", "update"}):
-        return "secret-rotation"
-    if "credential" in tokens and tokens.intersection({"rotation", "rotate", "change", "update"}):
-        return "credential-rotation"
-    if "destructive" in tokens or "destroy" in tokens or "delete" in tokens:
-        return "destructive-action"
-    if "external" in tokens and "write" in tokens:
-        return "external-write"
-    if "environment" in tokens and tokens.intersection({"mutation", "change", "update", "modify", "write"}):
-        return "environment-mutation"
-    if "production" in tokens and tokens.intersection({"change", "mutation", "update", "modify", "write"}):
-        return "production-change"
+    categories = _action_categories(set(normalized.split("-")))
+    if len(categories) == 1:
+        return categories[0]
+    if len(categories) > 1:
+        return "compound:" + "+".join(sorted(categories))
     return normalized
 
 
@@ -79,6 +100,7 @@ class ApprovalRecord:
     expires_at: str = ""
     approved_at: str = ""
     approval_event_hash: str = ""
+    requester: str = ""
 
 
 ApprovalAuthorizer = Callable[[str, "ApprovalRecord"], bool]
@@ -97,6 +119,7 @@ def _deserialize_record(payload: str) -> ApprovalRecord:
     data.setdefault("expires_at", "")
     data.setdefault("approved_at", "")
     data.setdefault("approval_event_hash", "")
+    data.setdefault("requester", "")
     return ApprovalRecord(**data)
 
 
@@ -144,14 +167,24 @@ class ApprovalGate:
         approver: str,
         evidence: Optional[List[str]] = None,
         notes: str = "",
+        *,
+        requester: str = "",
     ) -> ApprovalRecord:
+        """Record a pending approval request.
+
+        requester is the identity asking for the action (normally the task owner). When it is
+        set, that identity can never approve the request. Production actions require it.
+        """
         task_id = (task_id or "").strip()
         action = (action or "").strip()
         scope = (scope or "").strip()
         approver = (approver or "").strip()
+        requester = (requester or "").strip()
         evidence_copy = list(evidence or [])
         if not all((task_id, action, scope, approver)):
             raise ValueError("task_id, action, scope, and approver must be non-empty")
+        if requester and requester == approver:
+            raise ValueError("Separation of duties: the requester cannot be the approver")
         if any(not isinstance(item, str) or not item.strip() for item in evidence_copy):
             raise ValueError("evidence references must be non-empty strings")
         created = datetime.now(timezone.utc)
@@ -162,6 +195,7 @@ class ApprovalGate:
             approver=approver,
             evidence=evidence_copy,
             notes=notes,
+            requester=requester,
             timestamp=created.isoformat(timespec="microseconds"),
             expires_at=(created + timedelta(seconds=self.approval_ttl_seconds)).isoformat(timespec="microseconds"),
         )
@@ -186,6 +220,7 @@ class ApprovalGate:
                     "action": _canonical_action(action),
                     "scope": scope,
                     "requested_approver": approver,
+                    "requester": requester,
                     "evidence_sha256": _evidence_digest(evidence_copy),
                     "expires_at": record.expires_at,
                 },
@@ -235,6 +270,12 @@ class ApprovalGate:
                     payload={"reason": "actor_mismatch"},
                 )
                 return False
+            if record.requester and attempted_actor == record.requester:
+                self.store.append_event_in_transaction(
+                    connection, "approval.denied", task_id=task_id, actor=attempted_actor,
+                    payload={"reason": "separation_of_duties"},
+                )
+                return False
             if not record.evidence or not evidence:
                 record.status = ApprovalStatus.BLOCKED
                 record.notes = (record.notes + " Evidence is required before approval.").strip()
@@ -281,6 +322,7 @@ class ApprovalGate:
                     "scope": record.scope,
                     "evidence_sha256": _evidence_digest(record.evidence),
                     "expires_at": record.expires_at,
+                    "requester": record.requester,
                 },
             )
             record.status = ApprovalStatus.APPROVED
@@ -419,6 +461,7 @@ class ApprovalGate:
                             or proof_payload.get("scope") != record.scope
                             or proof_payload.get("evidence_sha256") != _evidence_digest(record.evidence)
                             or proof_payload.get("expires_at") != record.expires_at
+                            or proof_payload.get("requester", "") != record.requester
                         ):
                             reason = "approval_proof_mismatch"
             if reason is None and self._is_expired(record):
@@ -438,9 +481,17 @@ class ApprovalGate:
                 connection.execute("UPDATE approvals SET record_json=? WHERE task_id=?", (_serialize_record(record), task_id))
                 reason = "evidence_mismatch"
 
-            if reason is None and _is_production() and not self.store.verify_task_status(task_id, "AWAITING_APPROVAL"):
+            if reason is None and _is_production() and (
+                not record.requester or record.requester == record.approver
+            ):
+                reason = "separation_of_duties_unverified"
+            if reason is None and _is_production() and not self.store.verify_task_status(
+                task_id, "AWAITING_APPROVAL", chain_verified=True
+            ):
                 reason = "task_state_not_audited_awaiting_approval"
-            if reason is None and _is_production() and not self.store.verify_evidence_state(task_id, list(evidence or [])):
+            if reason is None and _is_production() and not self.store.verify_evidence_state(
+                task_id, list(evidence or []), chain_verified=True
+            ):
                 reason = "evidence_state_or_audit_mismatch"
 
             if reason:

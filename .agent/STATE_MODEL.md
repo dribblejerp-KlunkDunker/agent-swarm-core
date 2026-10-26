@@ -147,7 +147,8 @@ Examples:
 - `GROUNDED -> RELEASED` is invalid without planning and verification
 - `VERIFYING -> READY_FOR_RELEASE` is invalid unless evidence checks are recorded
 - `READY_FOR_RELEASE -> RELEASED` is invalid without explicit approval when approval is required
-- `BLOCKED -> IN_PROGRESS` requires a new state justification and a documented unblock path
+- leaving `BLOCKED` requires a justification, and a task may only resume to the stage it was blocked from or an earlier one (a task blocked from `GROUNDED` cannot resume at `IN_PROGRESS`); a task blocked at `VERIFYING` or later resumes no later than `IN_PROGRESS`
+- unblocking clears the blocker list; the audit log keeps every blocker that was added
 
 ## Required task record schema
 
