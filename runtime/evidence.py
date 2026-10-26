@@ -41,8 +41,14 @@ class EvidenceRegistry:
         return (row["id"],row["task_id"],row["title"],hashlib.sha256(row["content"].encode("utf-8")).hexdigest(),row["source"],row["status"],row["tags_json"])
 
     def add(self,bundle:EvidenceBundle)->None:
-        if any(not isinstance(v,str) or not v.strip() for v in (bundle.task_id,bundle.title,bundle.content,bundle.source)):
-            raise ValueError("Evidence requires non-empty task_id, title, content, and source")
+        for field_name, value in (
+            ("task_id", bundle.task_id),
+            ("title", bundle.title),
+            ("content", bundle.content),
+            ("source", bundle.source),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Evidence requires non-empty {field_name}")
         if bundle.status!=EvidenceStatus.PENDING: raise ValueError("New evidence must start as PENDING and be verified by the registry")
         if not isinstance(bundle.tags,list) or any(not isinstance(x,str) or not x.strip() for x in bundle.tags):
             raise ValueError("Evidence tags must be a list of non-empty strings")

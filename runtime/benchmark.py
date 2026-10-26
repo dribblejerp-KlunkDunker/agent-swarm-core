@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Sequence, Optional
 
-from .evidence import EvidenceBundle, EvidenceRegistry
+from .evidence import EvidenceAuthorizer, EvidenceBundle, EvidenceRegistry
 from .storage import SQLiteStateStore
 from .task_state import TaskRecord, TaskStatus
 
@@ -26,8 +26,13 @@ class BenchmarkRunner:
         state_store: Optional[SQLiteStateStore] = None,
         *,
         db_path: Optional[str] = None,
+        evidence_authorizer: Optional[EvidenceAuthorizer] = None,
     ) -> None:
-        self.registry = EvidenceRegistry(state_store=state_store, db_path=db_path)
+        self.registry = EvidenceRegistry(
+            state_store=state_store,
+            db_path=db_path,
+            evidence_authorizer=evidence_authorizer,
+        )
 
     def run_core_task(self, task: TaskRecord) -> BenchmarkResult:
         architecture = 100
